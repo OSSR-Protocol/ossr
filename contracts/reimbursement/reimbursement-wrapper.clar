@@ -3,7 +3,7 @@
 ;; Purpose:
 ;; - Execute a target contract's `execute` entrypoint (user action)
 ;; - After successful execution, atomically transfer sBTC from this contract's escrow
-;;   to an operator principal and a protocol principal.
+;;   to the sponsoring operator.
 ;;
 ;; NOTE: Before deploying, set `sbtc-token` to the deployed sBTC contract principal.
 
@@ -13,25 +13,20 @@
 ;; Parameters:
 ;; - target-contract: the contract principal to call for the original action (must expose 'execute)
 ;; - operator: principal receiving operator reimbursement
-;; - protocol: principal receiving protocol fee
 ;; - operator-amount: amount (uint) of sBTC to send to operator
-;; - protocol-amount: amount (uint) of sBTC to send to protocol
 ;; - payload: opaque payload buffer forwarded to target-contract's `execute` entrypoint
 (define-public (process-and-reimburse (target-contract principal)
                                      (operator principal)
-                                     (protocol principal)
                                      (operator-amount uint)
-                                     (protocol-amount uint)
                                      (payload (buff 1024)))
   (begin
     ;; Call the target contract's `execute` entrypoint. The target contract must
     ;; implement (define-public (execute (payload (buff 1024))) ...).
     (let ((action-res (contract-call? target-contract 'execute payload)))
       (if (is-ok action-res)
-          (let ((op-res   (contract-call? sbtc-token 'transfer operator operator-amount))
-                (prot-res (contract-call? sbtc-token 'transfer protocol protocol-amount)))
-            ;; Require both token transfers to succeed; otherwise fail the whole tx.
-            (if (and (is-ok op-res) (is-ok prot-res))
+          (let ((op-res (contract-call? sbtc-token 'transfer operator operator-amount)))
+            ;; Require the sponsor payout to succeed; otherwise fail the whole tx.
+            (if (is-ok op-res)
                 (ok action-res)
                 (err u1)))
           (err u2)))))

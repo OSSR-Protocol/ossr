@@ -5,7 +5,7 @@
  * Usage (example):
  *   CONTRACT_ADDRESS=ST1... CONTRACT_NAME=reimbursement-wrapper \
  *   TARGET_CONTRACT=ST2.../target CONTRACT_NAME_TARGET=target \
- *   OPERATOR=ST... PROTOCOL=ST... OPERATOR_AMOUNT=10 PROTOCOL_AMOUNT=2 \
+ *   OPERATOR=ST... OPERATOR_AMOUNT=10 \
  *   PAYLOAD_HEX=010203 npx tsx packages/stacks/scripts/reimbursement-wrapper-test.ts
  */
 
@@ -27,22 +27,18 @@ async function main() {
   const targetContractAddress = process.env.TARGET_CONTRACT || '';
   const targetContractName = process.env.TARGET_CONTRACT_NAME || 'target';
   const operator = process.env.OPERATOR || '';
-  const protocol = process.env.PROTOCOL || '';
   const operatorAmount = Number(process.env.OPERATOR_AMOUNT || '10');
-  const protocolAmount = Number(process.env.PROTOCOL_AMOUNT || '2');
   const payloadHex = process.env.PAYLOAD_HEX || '';
 
-  if (!contractAddress || !targetContractAddress || !operator || !protocol) {
-    console.error('Please set CONTRACT_ADDRESS, TARGET_CONTRACT, OPERATOR, PROTOCOL in env');
+  if (!contractAddress || !targetContractAddress || !operator) {
+    console.error('Please set CONTRACT_ADDRESS, TARGET_CONTRACT, OPERATOR in env');
     process.exit(1);
   }
 
   const args = [
     contractPrincipalCV(targetContractAddress, targetContractName),
     contractPrincipalCV(operator.split('/')[0] || operator, operator.split('/')[1] || ''),
-    contractPrincipalCV(protocol.split('/')[0] || protocol, protocol.split('/')[1] || ''),
     uintCV(operatorAmount),
-    uintCV(protocolAmount),
     bufferCV(Buffer.from(payloadHex, 'hex'))
   ];
 
@@ -60,9 +56,7 @@ async function main() {
     contractName,
     functionName: 'process-and-reimburse',
     operator,
-    protocol,
     operatorAmount,
-    protocolAmount,
   });
 
   // NOTE: this is a scaffold — it assumes you have `PRIVATE_KEY` set to the origin tx signer.

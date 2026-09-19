@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   AddressHashMode,
   AddressVersion,
@@ -7,7 +7,11 @@ import {
   bufferCV,
   contractPrincipalCV,
   cvToString,
+  FungibleConditionCode,
   PayloadType,
+  PostConditionMode,
+  PostConditionPrincipalId,
+  PostConditionType,
   addressFromVersionHash,
   addressToString,
   deserializeTransaction,
@@ -27,6 +31,7 @@ import {
 import { OssrOperator } from './operator.js';
 import { SbtcReimbursementService } from './reimbursement.js';
 import { OperatorRegistry, type OperatorRegistryReader, toEntry } from './registry.js';
+import { MemoryQuoteStore, type QuoteStore } from './quote-store.js';
 
 const MAX_BODY_BYTES = 256 * 1024;
 const HEX = /^0x(?:[0-9a-fA-F]{2})+$/;
@@ -59,6 +64,13 @@ export type RelayApiConfig = {
   quoteLifetimeBlocks?: bigint;
   sponsorFeeSats?: bigint;
   corsAllowedOrigins?: string[];
+  /** Stacks Core RPC base URL exposing authenticated /v3 transaction simulation. */
+  simulationApiUrl?: string;
+  simulationAuthToken?: string;
+  simulationTimeoutMs?: number;
+  /** Test seam; production uses the Stacks Core simulation RPC. */
+  simulateTransaction?: (transaction: Uint8Array, txid: string, minimumBlockHeight: number) => Promise<void>;
+  quoteStore?: QuoteStore;
 };
 
 export type SponsorResponse = {
@@ -95,13 +107,13 @@ export type QuoteResponse = {
   quotePublicKey: string;
 };
 
-type StoredQuote = {
+export type StoredQuote = {
   quote: SbtcTransferQuote & { signature: string };
   intent: QuoteIntent;
   consumedBy?: string;
 };
 
-type QuoteIntent = {
+export type QuoteIntent = {
   origin: string;
   recipient: string;
   amountSats: bigint;
@@ -119,7 +131,9 @@ export class OssrRelayApi {
   private readonly healthPollIntervalMs: number;
   private readonly log: NonNullable<RelayApiConfig['logger']>;
   private readonly corsAllowedOrigins: string[];
-  private readonly quotes = new Map<string, StoredQuote>();
+  private readonly simulationApiUrl: string;
+  private readonly simulationTimeoutMs: number;
+  private readonly quoteStore: QuoteStore;
 
   constructor(private readonly config: RelayApiConfig) {
     this.stacksApiUrl = (config.stacksApiUrl ?? 'https://api.testnet.hiro.so').replace(/\/$/, '');
@@ -128,6 +142,10 @@ export class OssrRelayApi {
     if (!Number.isSafeInteger(this.healthPollIntervalMs) || this.healthPollIntervalMs < 1) throw new Error('healthPollIntervalMs must be a positive safe integer.');
     this.log = config.logger ?? (() => undefined);
     this.corsAllowedOrigins = config.corsAllowedOrigins ?? parseCorsOrigins(process.env.OSSR_CORS_ALLOWED_ORIGINS);
+    this.simulationApiUrl = (config.simulationApiUrl ?? this.stacksApiUrl).replace(/\/$/, '');
+    this.simulationTimeoutMs = config.simulationTimeoutMs ?? 15_000;
+    if (!Number.isSafeInteger(this.simulationTimeoutMs) || this.simulationTimeoutMs < 1) throw new Error('simulationTimeoutMs must be a positive safe integer.');
+    this.quoteStore = config.quoteStore ?? new MemoryQuoteStore();
   }
 
   createServer(): Server {
@@ -149,11 +167,12 @@ export class OssrRelayApi {
   async sponsor(input: unknown): Promise<SponsorResponse> {
     this.log('relay.transaction_state', { status: 'REQUESTED' });
     const { transaction: encoded, user, quoteId } = parseSponsorRequest(input);
-    const quote = quoteId ? this.requireUsableQuote(quoteId, user) : undefined;
+    if (!quoteId) throw new RelayError(400, 'QUOTE_REQUIRED', 'A relay-issued quoteId is required for sponsorship.');
+    const quote = await this.requireUsableQuote(quoteId, user);
     const transaction = deserializeOriginTransaction(encoded, user);
     this.config.validateTransaction?.(transaction);
-    defaultTransactionPolicy(transaction);
-    if (quote) validateTransactionAgainstQuote(transaction, quote);
+    defaultTransactionPolicy(transaction, quote.quote.adapterContract);
+    validateTransactionAgainstQuote(transaction, quote);
     this.log('relay.transaction_state', { status: 'ACCEPTED' });
 
     const health = await this.config.operator.health();
@@ -164,23 +183,38 @@ export class OssrRelayApi {
       throw new RelayError(422, 'FEE_OUT_OF_POLICY', 'Estimated network fee is outside relay policy.');
     }
 
+    const requestHash = transactionHash(encoded);
+    const minimumSimulationBlockHeight = Number(await this.currentStacksHeight()) + 1;
+    const reservation = await this.quoteStore.reserve(quoteId, requestHash);
+    if (!reservation) throw new RelayError(404, 'QUOTE_NOT_FOUND', 'Quote was not issued by this relay.');
+    if (reservation.kind === 'mismatch') throw new RelayError(409, 'IDEMPOTENCY_MISMATCH', 'Quote was already submitted with different transaction bytes.');
+    if (reservation.kind === 'processing') throw new RelayError(409, 'SPONSORSHIP_IN_PROGRESS', 'This quote is already being processed; retry after reconciliation.');
+    if (reservation.kind === 'completed') return reservation.result;
+
     let sponsored: Awaited<ReturnType<OssrOperator['sponsor']>>;
     let broadcast: Awaited<ReturnType<OssrOperator['broadcast']>>;
+    let simulationPassed = false;
     try {
-      sponsored = await this.config.operator.sponsor(encoded, feeMicroStx);
+      const result = await this.config.operator.sponsorAndBroadcast(encoded, feeMicroStx, async signed => {
+        await this.simulate(signed.transaction, signed.txid, minimumSimulationBlockHeight);
+        simulationPassed = true;
+        this.log('relay.transaction_state', { status: 'SIMULATED', transactionId: signed.txid });
+      });
+      sponsored = result.signed;
       this.log('relay.transaction_state', { status: 'SPONSORED', transactionId: sponsored.txid });
-      broadcast = await this.config.operator.broadcast(sponsored.transaction);
+      broadcast = result.broadcast;
     } catch (error) {
+      if (!simulationPassed) await this.quoteStore.release(quoteId, requestHash);
       await this.recordFailure();
       throw error;
     }
-    await this.recordSuccess(broadcast.txid);
-    if (quote) quote.consumedBy = broadcast.txid;
     const sponsorshipId = broadcast.txid;
+    const result = { status: 'BROADCAST' as const, operator: this.config.operator.address, transaction_id: broadcast.txid, fee_microstx: feeMicroStx.toString(), sponsorship_id: this.config.reimbursementService ? sponsorshipId : undefined };
+    await this.quoteStore.complete(quoteId, requestHash, result);
+    await this.recordSuccess(broadcast.txid);
     if (this.config.reimbursementService) {
       await this.config.reimbursementService.create({ sponsorshipId, stacksTxId: broadcast.txid, feePaidMicroStx: feeMicroStx });
     }
-    const result = { status: 'BROADCAST' as const, operator: this.config.operator.address, transaction_id: broadcast.txid, fee_microstx: feeMicroStx.toString(), sponsorship_id: this.config.reimbursementService ? sponsorshipId : undefined };
     this.log('relay.transaction_state', { status: 'BROADCAST', transactionId: broadcast.txid });
     return result;
   }
@@ -242,7 +276,7 @@ export class OssrRelayApi {
       keyId: this.config.quoteKeyId ?? 'dev-quote-key',
     };
     const quote = { ...unsigned, signature: signStructuredData({ message: quoteMessageCV(unsigned), domain: quoteDomainCV(), privateKey: this.config.quotePrivateKey }) };
-    this.quotes.set(quote.quoteId, { quote, intent });
+    await this.quoteStore.putIssued({ quote, intent });
     return { quote, quotePublicKey: this.quotePublicKey() };
   }
 
@@ -252,6 +286,35 @@ export class OssrRelayApi {
     const rate = (await response.text()).trim();
     if (!/^[0-9]+$/.test(rate)) throw new RelayError(503, 'FEE_UNAVAILABLE', 'Fee estimator returned an invalid rate.');
     return BigInt(rate) * BigInt(estimateTransactionByteLength(transaction));
+  }
+
+  private async simulate(transaction: Uint8Array, expectedTxid: string, minimumBlockHeight: number): Promise<void> {
+    if (this.config.simulateTransaction) {
+      await this.config.simulateTransaction(transaction, expectedTxid, minimumBlockHeight);
+      return;
+    }
+    let response: Response;
+    try {
+      response = await fetch(`${this.simulationApiUrl}/v3/transactions/simulate`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          ...(this.config.simulationAuthToken ? { authorization: this.config.simulationAuthToken } : {}),
+        },
+        body: JSON.stringify({ transaction_hex: Buffer.from(transaction).toString('hex') }),
+        signal: AbortSignal.timeout(this.simulationTimeoutMs),
+      });
+    } catch (error) {
+      throw new RelayError(503, 'SIMULATION_UNAVAILABLE', `Transaction simulation request failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!response.ok) {
+      throw new RelayError(503, 'SIMULATION_UNAVAILABLE', `Transaction simulation returned HTTP ${response.status}.`);
+    }
+    let body: unknown;
+    try { body = await response.json(); }
+    catch { throw new RelayError(503, 'SIMULATION_INVALID_RESPONSE', 'Transaction simulation returned invalid JSON.'); }
+    validateSimulationResponse(body, expectedTxid, minimumBlockHeight);
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -304,7 +367,7 @@ export class OssrRelayApi {
     if (request.method === 'GET' && sponsorshipMatch) {
       try {
         const status = await this.config.operator.transactionStatus(sponsorshipMatch[1]);
-        const stored = [...this.quotes.values()].find(quote => quote.consumedBy === sponsorshipMatch[1]);
+        const stored = await this.quoteStore.findByTransactionId(sponsorshipMatch[1]);
         respond(request, response, 200, { transactionId: `0x${sponsorshipMatch[1]}`, quoteId: stored?.quote.quoteId, status: status.status, blockHeight: status.blockHeight, raw: status.raw }, this.corsAllowedOrigins);
       } catch (error) {
         const relayError = toRelayError(error);
@@ -396,12 +459,44 @@ export class OssrRelayApi {
     return BigInt(body.stacks_tip_height);
   }
 
-  private requireUsableQuote(quoteId: string, origin: string): StoredQuote {
-    const stored = this.quotes.get(quoteId);
-    if (!stored) throw new RelayError(404, 'QUOTE_NOT_FOUND', 'Quote was not issued by this relay process.');
-    if (stored.consumedBy) throw new RelayError(409, 'QUOTE_ALREADY_USED', 'Quote has already been consumed.');
+  private async requireUsableQuote(quoteId: string, origin: string): Promise<StoredQuote> {
+    const stored = await this.quoteStore.get(quoteId);
+    if (!stored) throw new RelayError(404, 'QUOTE_NOT_FOUND', 'Quote was not issued by this relay.');
+    if (stored.state === 'BROADCAST' && stored.result) return stored;
     if (stored.quote.origin !== origin) throw new RelayError(422, 'QUOTE_ORIGIN_MISMATCH', 'Quote origin does not match submitted user.');
+    const height = await this.currentStacksHeight();
+    if (height > BigInt(stored.quote.expiresAtBlock)) throw new RelayError(422, 'QUOTE_EXPIRED', 'Quote has expired.');
     return stored;
+  }
+}
+
+function transactionHash(encoded: string): string {
+  return createHash('sha256').update(Buffer.from(encoded.slice(2), 'hex')).digest('hex');
+}
+
+export function validateSimulationResponse(body: unknown, expectedTxid: string, minimumBlockHeight: number): void {
+  if (!isRecord(body)
+    || typeof body.txid !== 'string' || !/^(?:0x)?[0-9a-f]{64}$/i.test(body.txid)
+    || typeof body.tip_block_id !== 'string' || !/^(?:0x)?[0-9a-f]{64}$/i.test(body.tip_block_id)
+    || typeof body.consensus_hash !== 'string' || !/^(?:0x)?[0-9a-f]{40}$/i.test(body.consensus_hash)
+    || typeof body.block_height !== 'number' || !Number.isSafeInteger(body.block_height) || body.block_height < 1
+    || typeof body.result_hex !== 'string' || !/^0x(?:[0-9a-f]{2})+$/i.test(body.result_hex)
+    || typeof body.stx_burned !== 'number' || !Number.isSafeInteger(body.stx_burned) || body.stx_burned < 0
+    || !isRecord(body.execution_cost) || !isRecord(body.execution_limit)
+    || !Array.isArray(body.events)
+    || typeof body.post_condition_aborted !== 'boolean'
+    || !('vm_error' in body) || (body.vm_error !== null && typeof body.vm_error !== 'string')) {
+    throw new RelayError(503, 'SIMULATION_INVALID_RESPONSE', 'Transaction simulation response is incomplete or malformed.');
+  }
+  const txid = body.txid.replace(/^0x/, '').toLowerCase();
+  if (txid !== expectedTxid.replace(/^0x/, '').toLowerCase()) {
+    throw new RelayError(503, 'SIMULATION_INVALID_RESPONSE', 'Transaction simulation returned a mismatched transaction ID.');
+  }
+  if (body.block_height < minimumBlockHeight) {
+    throw new RelayError(503, 'SIMULATION_STALE', `Transaction simulation used block height ${body.block_height}, below required height ${minimumBlockHeight}.`);
+  }
+  if (body.post_condition_aborted || body.vm_error !== null || body.result_hex.toLowerCase() !== '0x0703') {
+    throw new RelayError(422, 'SIMULATION_FAILED', 'Transaction simulation did not return (ok true).');
   }
 }
 
@@ -464,15 +559,13 @@ function originAddress(transaction: ReturnType<typeof deserializeTransaction>): 
   return addressToString(addressFromVersionHash(singleSig ? AddressVersion.TestnetSingleSig : AddressVersion.TestnetMultiSig, condition.signer));
 }
 
-function defaultTransactionPolicy(transaction: ReturnType<typeof deserializeTransaction>): void {
+function defaultTransactionPolicy(transaction: ReturnType<typeof deserializeTransaction>, adapterContract: string): void {
   if (transaction.payload.payloadType === PayloadType.ContractCall) {
-    const address = process.env.ADAPTER_CONTRACT_ADDRESS?.trim();
-    const name = process.env.ADAPTER_CONTRACT_NAME?.trim() || 'sbtc-sponsored-transfer-v1';
     const payload = transaction.payload;
-    if (address && addressToString(payload.contractAddress) === address && payload.contractName.content === name && payload.functionName.content === 'sponsored-transfer') return;
+    if (`${addressToString(payload.contractAddress)}.${payload.contractName.content}` === adapterContract && payload.functionName.content === 'sponsored-transfer') return;
     throw new RelayError(422, 'UNSUPPORTED_TRANSACTION', 'Only the configured sBTC sponsored-transfer adapter may be sponsored.');
   }
-  throw new RelayError(422, 'UNSUPPORTED_TRANSACTION', 'Only STX transfers and the configured sBTC sponsored-transfer adapter are supported.');
+  throw new RelayError(422, 'UNSUPPORTED_TRANSACTION', 'Only the configured sBTC sponsored-transfer adapter may be sponsored.');
 }
 
 function validateTransactionAgainstQuote(transaction: ReturnType<typeof deserializeTransaction>, stored: StoredQuote): void {
@@ -500,6 +593,32 @@ function validateTransactionAgainstQuote(transaction: ReturnType<typeof deserial
     expiresAt: BigInt(quote.expiresAtBlock),
   });
   if (recomputed !== quote.argumentsHash) throw new RelayError(422, 'QUOTE_TRANSACTION_MISMATCH', 'Stored quote arguments hash is inconsistent.');
+  validatePostConditions(transaction, stored);
+}
+
+function validatePostConditions(transaction: ReturnType<typeof deserializeTransaction>, stored: StoredQuote): void {
+  if (transaction.postConditionMode !== PostConditionMode.Deny) {
+    throw new RelayError(422, 'INVALID_POST_CONDITIONS', 'Post-condition mode must deny unspecified asset transfers.');
+  }
+  const conditions = transaction.postConditions.values;
+  if (conditions.length !== 1) {
+    throw new RelayError(422, 'INVALID_POST_CONDITIONS', 'Exactly one sBTC fungible-token post-condition is required.');
+  }
+  const condition = conditions[0];
+  if (condition.conditionType !== PostConditionType.Fungible || condition.conditionCode !== FungibleConditionCode.Equal) {
+    throw new RelayError(422, 'INVALID_POST_CONDITIONS', 'The post-condition must require an exact fungible-token outflow.');
+  }
+  if (condition.principal.prefix !== PostConditionPrincipalId.Standard || addressToString(condition.principal.address) !== stored.quote.origin) {
+    throw new RelayError(422, 'INVALID_POST_CONDITIONS', 'The post-condition principal must be the quote origin.');
+  }
+  const [assetAddress, assetContractName] = splitContractPrincipal(stored.quote.reimbursementAsset.contract);
+  if (addressToString(condition.asset.address) !== assetAddress || condition.asset.contractName.content !== assetContractName || condition.asset.assetName.content !== 'sbtc-token') {
+    throw new RelayError(422, 'INVALID_POST_CONDITIONS', 'The post-condition must reference the configured sBTC asset.');
+  }
+  const exactOutflow = stored.intent.amountSats + BigInt(stored.quote.sponsorFee);
+  if (condition.amount !== exactOutflow) {
+    throw new RelayError(422, 'INVALID_POST_CONDITIONS', 'The post-condition must equal the transfer amount plus sponsor fee.');
+  }
 }
 
 function argumentsHash(input: QuoteIntent & { quoteId: string; sponsorFee: bigint; expiresAt: bigint }): string {

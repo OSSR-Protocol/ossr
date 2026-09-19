@@ -7,8 +7,12 @@
   "supportedAction": "sbtc-transfer",
   "adapter": {
     "contractAddressEnv": "ADAPTER_CONTRACT_ADDRESS",
+    "verifiedContractAddress": "ST2SY3PZHMVQMYN1W4SBJ9MPHW4P8J01ST7TVQ68X",
     "contractName": "sbtc-sponsored-transfer-v1",
-    "functionName": "sponsored-transfer"
+    "functionName": "sponsored-transfer",
+    "deploymentTxId": "0x255acce3ab68c06d9516ecac4a952f00cbfcc7c79a0ae6b704ea4ed4638c0ca9",
+    "deploymentBlockHeight": "106723",
+    "sourceSha256": "3bf4b5ae525b72389f2b20047f92e1f19b02690d9158db92562dba20a6382d5b"
   },
   "reimbursementAsset": {
     "assetId": "sbtc",

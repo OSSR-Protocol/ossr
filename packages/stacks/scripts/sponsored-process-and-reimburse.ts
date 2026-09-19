@@ -42,10 +42,8 @@ async function main(): Promise<void> {
   const targetName = required('TARGET_CONTRACT_NAME');
 
   const operator = required('OPERATOR');
-  const protocol = required('PROTOCOL');
 
   const operatorAmount = nonNegativeInteger('OPERATOR_AMOUNT', '10');
-  const protocolAmount = nonNegativeInteger('PROTOCOL_AMOUNT', '2');
 
   const sponsorFee = nonNegativeInteger('SPONSOR_FEE_MICROSTX', '1000');
 
@@ -58,13 +56,12 @@ async function main(): Promise<void> {
     fetchNonce({ address: sponsorAddress, network }),
   ]);
 
-  // Build args matching the Clarity contract: (target-contract principal) (operator principal) (protocol principal) (operator-amount uint) (protocol-amount uint) (payload (buff 1024))
+  // Build args matching the Clarity contract: (target-contract principal)
+  // (operator principal) (operator-amount uint) (payload (buff 1024)).
   const args = [
     contractPrincipalCV(targetAddress, targetName),
     standardPrincipalCV(operator),
-    standardPrincipalCV(protocol),
     uintCV(operatorAmount),
-    uintCV(protocolAmount),
     bufferCV(Buffer.from(process.env.PAYLOAD_HEX || '', 'hex')),
   ];
 
@@ -100,9 +97,7 @@ async function main(): Promise<void> {
     userAddress,
     sponsorAddress,
     operator,
-    protocol,
     operatorAmount: operatorAmount.toString(),
-    protocolAmount: protocolAmount.toString(),
     userNonce: userNonce.toString(),
     sponsorNonce: sponsorNonce.toString(),
     originSignedBytes: originBytes.length / 2,

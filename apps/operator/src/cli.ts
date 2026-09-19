@@ -3,6 +3,8 @@ import { OssrOperator } from './operator.js';
 import { createRelayServer } from './api.js';
 import { JsonReimbursementStore, SbtcReimbursementService } from './reimbursement.js';
 import { JsonOperatorRegistryStore, OperatorRegistry } from './registry.js';
+import { JsonQuoteStore } from './quote-store.js';
+import { JsonNonceStore } from './nonce-store.js';
 
 loadEnv({ path: '.env.local', quiet: true });
 loadEnv({ quiet: true });
@@ -19,6 +21,7 @@ const operator = new OssrOperator({
   sponsorPrivateKey: required('SPONSOR_PRIVATE_KEY'),
   stacksApiUrl: process.env.STACKS_API_URL,
   minimumBalanceMicroStx: BigInt(process.env.OPERATOR_MINIMUM_BALANCE_MICROSTX ?? '0'),
+  nonceStore: new JsonNonceStore(process.env.NONCE_STORE_PATH ?? '.ossr/nonces.json'),
 });
 
 async function main(): Promise<void> {
@@ -30,6 +33,14 @@ async function main(): Promise<void> {
     const txid = process.argv[3];
     if (!txid) throw new Error('Usage: npm run operator:status -- <txid>');
     console.log(JSON.stringify(await operator.transactionStatus(txid), null, 2));
+    return;
+  }
+  if (command === 'nonce-status') {
+    console.log(JSON.stringify(await operator.nonceReservations(), null, 2));
+    return;
+  }
+  if (command === 'nonce-reconcile') {
+    console.log(JSON.stringify(await operator.reconcileNonceReservations(), null, 2));
     return;
   }
   if (command === 'serve') {
@@ -51,8 +62,6 @@ async function main(): Promise<void> {
       sbtcContractName: process.env.SBTC_CONTRACT_NAME,
       paymentFeeMicroStx: BigInt(process.env.REIMBURSEMENT_PAYMENT_FEE_MICROSTX ?? '10000'),
       operatorPaymentSats: BigInt(process.env.REIMBURSEMENT_OPERATOR_SATS ?? '10'),
-      protocolFeeSats: BigInt(process.env.REIMBURSEMENT_PROTOCOL_SATS ?? '2'),
-      protocolAddress: process.env.PROTOCOL_ADDRESS?.trim(),
       confirmationTimeoutMs: Number(process.env.CONFIRMATION_TIMEOUT_SECONDS ?? '86400') * 1_000,
       policy: {
         rateNumerator: BigInt(process.env.REIMBURSEMENT_RATE_NUMERATOR ?? '1'),
@@ -89,11 +98,15 @@ async function main(): Promise<void> {
       quoteLifetimeBlocks: BigInt(process.env.QUOTE_TTL_BLOCKS ?? '10'),
       sponsorFeeSats: BigInt(process.env.SBTC_SPONSOR_FEE_SATS ?? process.env.REIMBURSEMENT_OPERATOR_SATS ?? '10'),
       corsAllowedOrigins: process.env.OSSR_CORS_ALLOWED_ORIGINS?.split(',').map(origin => origin.trim()).filter(Boolean),
+      simulationApiUrl: process.env.STACKS_SIMULATION_API_URL?.trim(),
+      simulationAuthToken: process.env.STACKS_SIMULATION_AUTH_TOKEN?.trim(),
+      simulationTimeoutMs: Number(process.env.STACKS_SIMULATION_TIMEOUT_MS ?? '15000'),
+      quoteStore: new JsonQuoteStore(process.env.QUOTE_STORE_PATH ?? '.ossr/quotes.json'),
     });
     server.listen(port, host, () => console.log(JSON.stringify({ event: 'relay.listening', host, port, operator: operator.address })));
     return;
   }
-  throw new Error('Usage: npm run operator:health | npm run operator:status -- <txid> | npm run operator:serve');
+  throw new Error('Usage: npm run operator:health | npm run operator:status -- <txid> | npm run operator:nonce-status | npm run operator:nonce-reconcile | npm run operator:serve');
 }
 
 main().catch(error => { console.error(error instanceof Error ? error.message : error); process.exitCode = 1; });

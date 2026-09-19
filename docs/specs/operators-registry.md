@@ -124,6 +124,26 @@ The registry MUST:
 
 Registration MUST NOT require approval from a registry administrator.
 
+### 6.2.1 Protocol-maintenance listing fee
+
+Protocol maintenance is funded at operator onboarding rather than from user
+transactions. A deployment MAY require a one-time operator listing fee before
+an otherwise valid record becomes `active` and discoverable.
+
+When enabled, the registry MUST:
+
+1. publish the fee asset, exact amount, recipient, and policy version;
+2. verify payment from the registering operator before activation;
+3. bind the payment receipt to one operator registration so it cannot be
+   replayed to list another operator; and
+4. keep listing-fee accounting separate from sponsored-transaction quotes,
+   sponsor reimbursements, and user asset movements.
+
+The listing fee MUST NOT add a protocol recipient, protocol transfer, or
+protocol-payment record to an end-user sponsored transaction. Changing the fee
+or recipient is a registry-governance action and does not alter existing signed
+quotes.
+
 ### 6.3 Activation and deactivation
 
 An operator MAY activate its record when:
@@ -392,7 +412,7 @@ The following features are deferred:
 - slashing and dispute adjudication;
 - watcher registration and rewards;
 - randomized relay assignment;
-- governance and a protocol treasury;
+- listing-fee collection, governance, and a protocol-maintenance treasury;
 - operator auctions; and
 - automatic verification of sponsored transaction outcomes.
 
@@ -418,4 +438,6 @@ The following values and formats must be resolved before implementation:
 5. bounded Clarity types for versions, capabilities, URIs, and pricing;
 6. ownership-transfer and quote-key-rotation procedures;
 7. whether one owner may register multiple operators; and
-8. pagination and event schemas.
+8. pagination and event schemas;
+9. listing-fee asset, amount, recipient, payment-proof format, refund policy,
+   and renewal policy.

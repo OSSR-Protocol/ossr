@@ -20,15 +20,14 @@ while [ $SECONDS -le $DEADLINE ]; do
   fi
   status=$(echo "$rec" | jq -r '.status // empty')
   op_tx=$(echo "$rec" | jq -r '.reimbursement_tx_id // empty')
-  proto_tx=$(echo "$rec" | jq -r '.protocol_fee_tx_id // empty')
-  echo "status=$status op_tx=$op_tx proto_tx=$proto_tx"
+  echo "status=$status payout_tx=$op_tx"
   if [ "$status" = "REIMBURSED" ] || [ "$status" = "REIMBURSEMENT_FAILED" ]; then
     echo "Terminal status: $status"; echo "$rec" | jq .; exit 0
   fi
 
   confirmed=0
   need=0
-  for tx in "$op_tx" "$proto_tx"; do
+  for tx in "$op_tx"; do
     if [ -z "$tx" ] || [ "$tx" = "null" ]; then
       continue
     fi
@@ -44,7 +43,7 @@ while [ $SECONDS -le $DEADLINE ]; do
 
   echo "payments_confirmed=$confirmed of $need"
   if [ $need -gt 0 ] && [ $confirmed -eq $need ]; then
-    echo "Both payment txs confirmed. Fetching final record..."
+    echo "Sponsor payout confirmed. Fetching final record..."
     curl -sS "$API_BASE/v1/reimbursements/$SPONSOR_ID" | jq .
     exit 0
   fi

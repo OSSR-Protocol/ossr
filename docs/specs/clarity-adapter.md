@@ -151,17 +151,17 @@ than accepting the tool default silently.
 
 ### 5.3 Canonical sBTC dependency
 
-The adapter source uses the canonical sBTC requirement principal:
+The testnet adapter source pins the canonical testnet sBTC principal:
 
 ```clarity
 (define-constant SBTC_TOKEN
-  'SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token)
+  'SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token)
 ```
 
-Clarinet deployment remapping MUST resolve this dependency on testnet to:
+The verified testnet principal is:
 
 ```text
-ST1F7QA2MDF17S807EPA36TSS8AMEFY4KA9TVGWXT.sbtc-token
+SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token
 ```
 
 The deployment process MUST inspect the generated transaction plan and verify
@@ -171,7 +171,7 @@ broadcast.
 The sBTC fungible-token asset identifier used by post-conditions is:
 
 ```text
-ST1F7QA2MDF17S807EPA36TSS8AMEFY4KA9TVGWXT.sbtc-token::sbtc-token
+SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token::sbtc-token
 ```
 
 The dependency MUST NOT be supplied as a function argument. A dynamic trait

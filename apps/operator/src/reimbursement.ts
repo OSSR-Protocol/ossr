@@ -29,9 +29,6 @@ export type ReimbursementRecord = {
   fee_paid: string;
   reimbursement_amount: string;
   reimbursement_tx_id?: string;
-  protocol_address?: string;
-  protocol_fee_amount?: string;
-  protocol_fee_tx_id?: string;
   status: ReimbursementStatus;
   created_at: string;
   updated_at: string;
@@ -89,7 +86,13 @@ function normalizeRecord(record: ReimbursementRecord): ReimbursementRecord {
     reimbursement_failed: 'REIMBURSEMENT_FAILED',
   };
   const status = legacy[record.status] ?? record.status;
-  return { ...record, status, created_at: record.created_at ?? record.updated_at };
+  const normalized = { ...record } as ReimbursementRecord & Record<string, unknown>;
+  // Drop fields written by the earlier two-payment prototype. The pre-grant
+  // flow has one payout only: reimbursement to the transaction sponsor.
+  delete normalized.protocol_address;
+  delete normalized.protocol_fee_amount;
+  delete normalized.protocol_fee_tx_id;
+  return { ...normalized, status, created_at: record.created_at ?? record.updated_at };
 }
 
 export type ReimbursementServiceConfig = {
@@ -104,9 +107,6 @@ export type ReimbursementServiceConfig = {
   paymentFeeMicroStx?: bigint;
   /** Fixed operator share for the testnet PoC, in sats. */
   operatorPaymentSats?: bigint;
-  /** Protocol share paid separately from the operator reimbursement, in sats. */
-  protocolFeeSats?: bigint;
-  protocolAddress?: string;
   /** Mark a broadcast transaction unresolved after this duration. Defaults to 24 hours. */
   confirmationTimeoutMs?: number;
   logger?: (event: string, fields?: Record<string, unknown>) => void;
@@ -144,8 +144,6 @@ export class SbtcReimbursementService {
       operator: this.config.operator.address,
       fee_paid: input.feePaidMicroStx.toString(),
       reimbursement_amount: reimbursementSats.toString(),
-      protocol_address: this.config.protocolAddress,
-      protocol_fee_amount: this.config.protocolFeeSats?.toString(),
       status: 'BROADCAST',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -173,8 +171,7 @@ export class SbtcReimbursementService {
       if (record.status === 'CONFIRMED') return this.ensurePayments(record);
       if (record.status !== 'PAYMENTS_BROADCAST') throw new Error(`Unknown active transaction state: ${record.status}`);
       if (!record.reimbursement_tx_id) return this.transition(record, 'REIMBURSEMENT_FAILED', 'Operator payment transaction ID is missing.');
-      const payments = [record.reimbursement_tx_id, record.protocol_fee_tx_id].filter((txid): txid is string => Boolean(txid));
-      const statuses = await Promise.all(payments.map(txid => this.config.operator.transactionStatus(txid)));
+      const statuses = await Promise.all([this.config.operator.transactionStatus(record.reimbursement_tx_id)]);
       const failed = statuses.find(payment => payment.status.startsWith('abort_') || payment.status === 'dropped_replace_by_fee');
       if (failed) {
         return this.transition(record, 'REIMBURSEMENT_FAILED', `sBTC payment ${failed.status}`);
@@ -199,12 +196,6 @@ export class SbtcReimbursementService {
       let updated = record;
       if (!updated.reimbursement_tx_id) {
         updated = await this.save({ ...updated, reimbursement_tx_id: await this.broadcastTransfer(BigInt(updated.reimbursement_amount), updated.operator) });
-      }
-      if (this.config.protocolFeeSats && this.config.protocolFeeSats > 0n) {
-        if (!this.config.protocolAddress) throw new Error('PROTOCOL_ADDRESS is required when REIMBURSEMENT_PROTOCOL_SATS is positive.');
-        if (!updated.protocol_fee_tx_id) {
-          updated = await this.save({ ...updated, protocol_fee_tx_id: await this.broadcastTransfer(this.config.protocolFeeSats, this.config.protocolAddress) });
-        }
       }
       return this.transition(updated, 'PAYMENTS_BROADCAST');
     } catch (error) {

@@ -6,6 +6,7 @@ import {
   getAddressFromPrivateKey,
   sponsorTransaction,
 } from '@stacks/transactions';
+import { MemoryNonceStore, type NonceReservation, type NonceStore } from './nonce-store.js';
 
 export type LogFields = Record<string, unknown>;
 export type Logger = (event: string, fields?: LogFields) => void;
@@ -18,6 +19,7 @@ export type OperatorConfig = {
   minimumBalanceMicroStx?: bigint;
   stacksApiUrl?: string;
   logger?: Logger;
+  nonceStore?: NonceStore;
 };
 
 export type OperatorBalance = {
@@ -42,6 +44,8 @@ export type TransactionStatus = {
   raw: unknown;
 };
 
+export type SponsoredTransaction = { transaction: Uint8Array; txid: string; sponsorNonce: bigint };
+
 export class OssrOperator {
   readonly address: string;
   private readonly apiUrl: string;
@@ -49,6 +53,7 @@ export class OssrOperator {
   private readonly log: Logger;
   private nextSponsorNonce?: bigint;
   private nonceQueue: Promise<void> = Promise.resolve();
+  private readonly nonceStore: NonceStore;
 
   constructor(private readonly config: OperatorConfig) {
     if (!config.sponsorPrivateKey.trim()) throw new Error('SPONSOR_PRIVATE_KEY is required.');
@@ -56,6 +61,7 @@ export class OssrOperator {
     this.apiUrl = (config.stacksApiUrl ?? 'https://api.testnet.hiro.so').replace(/\/$/, '');
     this.minimumBalanceMicroStx = config.minimumBalanceMicroStx ?? 0n;
     this.log = config.logger ?? jsonLogger;
+    this.nonceStore = config.nonceStore ?? new MemoryNonceStore();
   }
 
   async balance(): Promise<OperatorBalance> {
@@ -103,38 +109,65 @@ export class OssrOperator {
    * Adds this operator's sponsor authorization. Calls are serialized so one
    * process never signs two transactions with the same sponsor nonce.
    */
-  async sponsor(originSignedTransaction: string | Uint8Array, feeMicroStx: bigint): Promise<{ transaction: Uint8Array; txid: string; sponsorNonce: bigint }> {
+  async sponsor(originSignedTransaction: string | Uint8Array, feeMicroStx: bigint): Promise<SponsoredTransaction> {
     if (feeMicroStx <= 0n) throw new Error('Sponsor fee must be greater than zero.');
     return this.withNonceLock(async () => {
-      const balance = await this.balance();
-      if (balance.availableMicroStx < feeMicroStx + this.minimumBalanceMicroStx) {
-        throw new Error('Operator has insufficient STX for this fee and its configured balance reserve.');
-      }
+      const signed = await this.signAtCurrentNonce(originSignedTransaction, feeMicroStx);
+      await this.nonceStore.reserve(this.address, signed.sponsorNonce, signed.txid, 'SIGNED');
+      this.nextSponsorNonce = signed.sponsorNonce + 1n;
+      return signed;
+    });
+  }
 
-      const transaction = deserializeTransaction(originSignedTransaction);
-      if (transaction.auth.authType !== AuthType.Sponsored) {
-        throw new Error('Operator accepts only origin-signed sponsored transactions.');
+  /**
+   * Signs under the nonce lock, runs a fail-closed pre-broadcast check, and
+   * broadcasts only if that check succeeds. A rejected check does not reserve
+   * the sponsor nonce because the signed bytes never leave this process.
+   */
+  async sponsorAndBroadcast(
+    originSignedTransaction: string | Uint8Array,
+    feeMicroStx: bigint,
+    beforeBroadcast: (signed: SponsoredTransaction) => Promise<void>,
+  ): Promise<{ signed: SponsoredTransaction; broadcast: { txid: string } }> {
+    if (feeMicroStx <= 0n) throw new Error('Sponsor fee must be greater than zero.');
+    return this.withNonceLock(async () => {
+      const signed = await this.signAtCurrentNonce(originSignedTransaction, feeMicroStx);
+      await beforeBroadcast(signed);
+      await this.nonceStore.reserve(this.address, signed.sponsorNonce, signed.txid, 'SIMULATED');
+      this.nextSponsorNonce = signed.sponsorNonce + 1n;
+      try {
+        const broadcast = await this.broadcast(signed.transaction);
+        await this.nonceStore.update(this.address, signed.txid, { status: 'BROADCAST', chainStatus: 'pending' });
+        return { signed, broadcast };
+      } catch (error) {
+        await this.nonceStore.update(this.address, signed.txid, { status: 'AMBIGUOUS', failureReason: message(error) });
+        throw error;
       }
+    });
+  }
 
-      const sponsorNonce = this.nextSponsorNonce ?? await fetchNonce({
-        address: this.address,
-        network: this.config.network,
-        client: { baseUrl: this.apiUrl },
-      });
-      const signed = await sponsorTransaction({
-        transaction,
-        sponsorPrivateKey: this.config.sponsorPrivateKey,
-        sponsorNonce,
-        fee: feeMicroStx,
-        network: this.config.network,
-      });
-      // Reserve locally only after signing. A failed signing attempt can retry
-      // the chain nonce; a signed transaction must never be reused locally.
-      this.nextSponsorNonce = sponsorNonce + 1n;
-      const serialized = signed.serializeBytes();
-      const txid = signed.txid();
-      this.log('operator.sponsored', { txid, sponsorNonce: sponsorNonce.toString(), feeMicroStx: feeMicroStx.toString() });
-      return { transaction: serialized, txid, sponsorNonce };
+  async nonceReservations(): Promise<NonceReservation[]> { return this.nonceStore.list(this.address); }
+
+  async reconcileNonceReservations(): Promise<NonceReservation[]> {
+    return this.withNonceLock(async () => {
+      const records = await this.nonceStore.list(this.address);
+      for (const record of records.filter(value => !['CONFIRMED', 'FAILED'].includes(value.status))) {
+        try {
+          const chain = await this.transactionStatus(record.txid);
+          if (chain.status === 'success') {
+            await this.nonceStore.update(this.address, record.txid, { status: 'CONFIRMED', chainStatus: chain.status, failureReason: undefined });
+          } else if (chain.status.startsWith('abort_') || chain.status === 'dropped_replace_by_fee') {
+            await this.nonceStore.update(this.address, record.txid, { status: 'FAILED', chainStatus: chain.status, failureReason: chain.status });
+          } else if (chain.status === 'not_found') {
+            await this.nonceStore.update(this.address, record.txid, { status: 'AMBIGUOUS', chainStatus: chain.status });
+          } else {
+            await this.nonceStore.update(this.address, record.txid, { chainStatus: chain.status });
+          }
+        } catch (error) {
+          await this.nonceStore.update(this.address, record.txid, { status: 'AMBIGUOUS', failureReason: message(error) });
+        }
+      }
+      return this.nonceStore.list(this.address);
     });
   }
 
@@ -171,6 +204,34 @@ export class OssrOperator {
     this.nonceQueue = new Promise(resolve => { release = resolve; });
     await previous;
     try { return await operation(); } finally { release(); }
+  }
+
+  private async signAtCurrentNonce(originSignedTransaction: string | Uint8Array, feeMicroStx: bigint): Promise<SponsoredTransaction> {
+    const balance = await this.balance();
+    if (balance.availableMicroStx < feeMicroStx + this.minimumBalanceMicroStx) {
+      throw new Error('Operator has insufficient STX for this fee and its configured balance reserve.');
+    }
+    const transaction = deserializeTransaction(originSignedTransaction);
+    if (transaction.auth.authType !== AuthType.Sponsored) {
+      throw new Error('Operator accepts only origin-signed sponsored transactions.');
+    }
+    const chainNonce = this.nextSponsorNonce ?? await fetchNonce({
+      address: this.address,
+      network: this.config.network,
+      client: { baseUrl: this.apiUrl },
+    });
+    const sponsorNonce = await this.nonceStore.nextNonce(this.address, chainNonce);
+    const signed = await sponsorTransaction({
+      transaction,
+      sponsorPrivateKey: this.config.sponsorPrivateKey,
+      sponsorNonce,
+      fee: feeMicroStx,
+      network: this.config.network,
+    });
+    const serialized = signed.serializeBytes();
+    const txid = signed.txid();
+    this.log('operator.sponsored', { txid, sponsorNonce: sponsorNonce.toString(), feeMicroStx: feeMicroStx.toString() });
+    return { transaction: serialized, txid, sponsorNonce };
   }
 }
 

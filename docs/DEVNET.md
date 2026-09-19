@@ -64,6 +64,10 @@ docker network inspect ossr.devnet --format '{{(index .IPAM.Config 0).Subnet}}'
 
 ## Current Local Status
 
+Last verified September 18, 2026 from an isolated source snapshot with no
+existing dependencies or generated runtime state. A fresh `npm ci` completed
+before running the checks below.
+
 Verified contract checks:
 
 ```sh
@@ -94,3 +98,13 @@ checked these balance deltas:
 - user: `+890` mock sBTC
 - recipient: `+100` mock sBTC
 - sponsor: `+10` mock sBTC
+
+The verified transaction IDs were:
+
+- mint: `2cfe71e7fb9c366af65610a9b65a318a6e508c0c08fb85b1b976f89bae01ef93`
+- transfer: `6b1b230d390d1bb0eb2b871739987f4525e51abd6d75a409cb22b1c269564150`
+
+Ports `18443` and `18444` were already occupied by an unrelated local Bitcoin
+service during this verification, so the isolated snapshot used temporary
+Bitcoin RPC and P2P port overrides (`28443` and `28444`). No repository devnet
+configuration was changed.

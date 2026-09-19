@@ -1,620 +1,183 @@
-# OSSR MVP 0.1 — 15-Day Roadmap
-
-**Goal:** have a working Stacks testnet prototype that demonstrates real fee sponsorship, operator selection, reimbursement in sBTC, basic failure handling, and a simple UI suitable for the Stacks Endowment application.
-
-### MVP 0.1 success criteria
-
-By Day 15:
-
-> A user can submit a Stacks transaction without holding STX, an OSSR operator pays the STX transaction fee, the transaction is confirmed, and the operator receives an sBTC reimbursement.
-
-Keep the MVP deliberately narrow: **1 network, 1 operator initially, 1 transaction type, testnet, no production custody.**
-
----
-
-## Phase 1 — Core sponsorship
-
-### Day 1 — Architecture + transaction flow
-
-Define the exact protocol flow.
-
-```text
-User
- │
- │ unsigned transaction
- ▼
-OSSR API
- │
- │ find operator
- ▼
-Operator
- │
- │ sponsor + broadcast
- ▼
-Stacks Testnet
- │
- │ confirmation
- ▼
-Reimbursement
- │
- ▼
-Operator
-```
-
-Deliver:
-
-* `ARCHITECTURE.md`
-* protocol sequence diagram
-* transaction lifecycle
-* failure states
-* MVP scope frozen
-
-**Important decision:** use a simple API/relay architecture rather than trying to decentralize everything immediately.
-
----
-
-### Day 2 — Stacks sponsored transaction PoC
-
-Implement the lowest-level transaction flow.
-
-Test:
-
-1. User constructs transaction.
-2. User signs transaction.
-3. Operator adds sponsorship.
-4. Operator signs.
-5. Broadcast to Stacks testnet.
-6. Confirm transaction.
-
-**Deliverable:** CLI/script successfully broadcasts one sponsored transaction.
-
-This is the most important technical milestone.
-
----
-
-### Day 3 — Operator wallet
-
-Create the operator component.
-
-```text
-operator/
-├── wallet
-├── balance
-├── sponsor()
-├── broadcast()
-└── health()
-```
-
-Implement:
-
-* operator STX balance check
-* transaction sponsorship
-* broadcast
-* transaction status
-* basic logging
-
-No operator registry yet.
-
-**Deliverable:** one functioning OSSR operator.
-
----
-
-### Day 4 — User transaction API
-
-Create the OSSR relay API.
-
-Example:
-
-```http
-POST /v1/sponsor
-```
-
-Input:
-
-```json
-{
-  "transaction": "...",
-  "user": "SP..."
-}
-```
-
-Response:
-
-```json
-{
-  "status": "accepted",
-  "operator": "...",
-  "transaction_id": "..."
-}
-```
-
-Implement:
-
-* transaction validation
-* user/origin validation
-* fee estimation
-* operator availability
-* sponsorship request
-
----
-
-### Day 5 — End-to-end test
-
-Connect everything.
-
-```text
-Frontend/CLI
-     ↓
-OSSR API
-     ↓
-Operator
-     ↓
-Stacks Testnet
-```
-
-Test with multiple transactions.
-
-Record:
-
-* fee
-* confirmation time
-* operator
-* transaction ID
-* failure cases
-
-**Milestone 1:**
-
-> OSSR can sponsor a real Stacks testnet transaction.
-
----
-
-# Phase 2 — Reimbursement
-
-### Day 6 — sBTC reimbursement design
-
-Define the reimbursement mechanism.
-
-For MVP:
-
-```text
-User
- │
- │ sponsorship request
- ▼
-Operator
- │
- │ pays STX
- ▼
-Stacks
- │
- │ transaction confirmed
- ▼
-User
- │
- │ sBTC reimbursement
- ▼
-Operator
-```
-
-Determine:
-
-* reimbursement amount
-* fee markup/protocol fee
-* minimum reimbursement
-* confirmation requirement
-* reimbursement transaction format
-
-Avoid complicated escrow at this stage.
-
-**Design delivered:** [sBTC reimbursement](../specs/reimbursement.md) defines
-the atomic settlement format, pricing policy, and confirmation rule used by
-the MVP.
-
----
-
-### Day 7 — Implement reimbursement
-
-Implement the actual testnet sBTC payment.
-
-After successful sponsorship:
-
-```text
-transaction confirmed
-        ↓
-calculate reimbursement
-        ↓
-create sBTC transfer
-        ↓
-operator receives sats
-```
-
-Store:
-
-```text
-sponsorship_id
-stacks_tx_id
-operator
-fee_paid
-reimbursement_amount
-reimbursement_tx_id
-status
-```
-
-**Deliverable:** complete economic loop.
-
----
-
-### Day 8 — Transaction state machine
-
-Implement explicit states:
-
-```text
-REQUESTED
-   ↓
-ACCEPTED
-   ↓
-SPONSORED
-   ↓
-BROADCAST
-   ↓
-CONFIRMED
-   ↓
-REIMBURSED
-```
-
-Failure states:
-
-```text
-REJECTED
-OPERATOR_UNAVAILABLE
-INSUFFICIENT_STX
-BROADCAST_FAILED
-CONFIRMATION_TIMEOUT
-REIMBURSEMENT_FAILED
-```
-
-This becomes important for demonstrating that OSSR isn't simply a centralized "gas station."
-
----
-
-# Phase 3 — Operator infrastructure
-
-### Day 9 — Operator registry
-
-Create a minimal registry.
-
-For MVP, this can initially be centralized/off-chain.
-
-Store:
-
-```text
-operator_id
-public_key
-endpoint
-status
-STX balance
-supported_transaction_types
-reimbursement_address
-last_seen
-```
-
-Example:
-
-```text
-Operator #001
-Status: ONLINE
-STX: 42.8
-sBTC: 0.0021
-Fee: 10 bps
-```
-
-Design the interface so it can later become an on-chain registry.
-
----
-
-### Day 10 — Operator selection
-
-Implement basic selection.
-
-For MVP:
-
-```text
-eligible operators
-        ↓
-filter healthy
-        ↓
-filter sufficient STX
-        ↓
-select operator
-```
-
-You can use randomized selection among eligible operators.
-
-Later:
-
-* reputation
-* liquidity
-* pricing
-* latency
-* batching capacity
-
-**Deliverable:** OSSR no longer depends architecturally on one hardcoded operator.
-
----
-
-### Day 11 — Failure handling + health
-
-Implement:
-
-```text
-Operator A
-   ↓
-insufficient STX
-   ↓
-reject
-   ↓
-Operator B
-   ↓
-sponsor
-```
-
-Add heartbeat:
-
-```text
-POST /operator/heartbeat
-```
-
-Track:
-
-* last heartbeat
-* STX balance
-* recent successful transactions
-* failure rate
-
-Automatically mark unhealthy operators.
-
-This directly addresses one of the important OSSR design problems you identified earlier: **what happens when an operator cannot proceed?**
-
----
-
-# Phase 4 — MVP interface
-
-### Day 12 — User dashboard
-
-Build the simplest useful UI.
-
-Screens:
-
-**1. Connect wallet**
-
-**2. Create transaction**
-
-**3. Sponsorship**
-
-```text
-Transaction fee
-0.002 STX
-
-Sponsored by
-OSSR Operator #001
-
-Reimbursement
-1.5 sats
-
-[ Sponsor Transaction ]
-```
-
-**4. Result**
-
-```text
-✓ Transaction confirmed
-
-Operator:
-#001
-
-STX fee:
-0.002
-
-Reimbursement:
-1.5 sats
-
-[View on Explorer]
-```
-
-Don't build a giant dashboard.
-
----
-
-### Day 13 — Operator dashboard
-
-Simple operator view:
-
-```text
-OSSR Operator
-
-Status       ONLINE
-STX Balance  42.8
-sBTC Balance 0.0021
-
-Transactions
-────────────────────
-23 sponsored
-21 successful
-2 failed
-
-Estimated earnings
-0.000012 BTC
-```
-
-Controls:
-
-```text
-[Go Offline]
-[Update Fee]
-[Withdraw]
-```
-
-The UI exists primarily to demonstrate the operator economics.
-
----
-
-# Phase 5 — Grant-ready prototype
-
-### Day 14 — Testing + polish
-
-Run the complete flow repeatedly.
-
-Test:
-
-* normal transaction
-* insufficient operator STX
-* unavailable operator
-* failed broadcast
-* duplicate request
-* invalid transaction
-* reimbursement failure
-* operator timeout
-
-Measure:
-
-```text
-Success rate
-Average sponsorship latency
-Average confirmation time
-Average operator cost
-Average reimbursement
-```
-
-Fix the most visible issues.
-
----
-
-### Day 15 — Demo + documentation
-
-Prepare the actual grant demonstration.
-
-The demo should take **3–5 minutes**:
-
-### Step 1
-
-User has **no STX**.
-
-### Step 2
-
-User creates a Stacks transaction.
-
-### Step 3
-
-OSSR finds an operator.
-
-### Step 4
-
-Operator pays the STX fee.
-
-### Step 5
-
-Transaction confirms.
-
-### Step 6
-
-Operator receives sBTC reimbursement.
-
-### Step 7
-
-Show both transactions in the explorer.
-
-Then show:
-
-```text
-OSSR
-Open Stacks Sponsor Relay
-
-User → Transaction
-          ↓
-       Operator
-          ↓
-     STX payment
-          ↓
-       Stacks
-          ↓
-     sBTC repayment
-```
-
----
-
-# MVP 0.1 architecture
-
-I would keep the initial repository approximately like this:
-
-```text
-ossr/
-│
-├── apps/
-│   ├── web/
-│   └── operator/
-│
-├── packages/
-│   ├── protocol/
-│   ├── stacks/
-│   ├── sbtc/
-│   └── types/
-│
-├── contracts/
-│   └── registry/
-│
-├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── PROTOCOL.md
-│   └── DEMO.md
-│
-└── README.md
-```
-
-The **registry contract can remain minimal or even be postponed** if implementing it would delay the core demo.
-
----
-
-# What NOT to build in 0.1
-
-Do **not** spend the 15 days building:
-
-* decentralized governance
-* sophisticated reputation
-* complex operator auctions
-* production custody
-* mainnet deployment
-* advanced batching
-* cross-chain sponsorship
-* DAO
-* tokenomics
-* mobile app
-* sophisticated analytics
-* permissionless operator economics
-
-Those are **0.2+**.
-
-The grant reviewer should see one thing working extremely clearly:
-
-> **A Stacks user can transact without holding STX because an independent OSSR operator pays the fee and is reimbursed in sBTC.**
-
----
-
-## Milestones
-
-| Day | Milestone              | Importance   |
-| --: | ---------------------- | ------------ |
-|   1 | Architecture           | Foundation   |
-|   2 | Sponsored TX PoC       | **Critical** |
-|   3 | Operator               | **Critical** |
-|   4 | API                    | Critical     |
-|   5 | End-to-end sponsorship | **Major**    |
-|   6 | Reimbursement design   | Major        |
-|   7 | sBTC reimbursement     | **Critical** |
-|   8 | State machine          | Major        |
-|   9 | Operator registry      | Major        |
-|  10 | Operator selection     | Major        |
-|  11 | Failure/health         | Major        |
-|  12 | User UI                | Major        |
-|  13 | Operator UI            | Medium       |
-|  14 | Testing                | **Critical** |
-|  15 | Demo + grant package   | **Critical** |
+# OSSR pre-grant prototype roadmap
+
+**Status:** implementation and testnet evidence in progress
+
+**Last updated:** September 18, 2026
+
+**Target:** a grant-reviewable Stacks testnet demonstration, not a production relay
+
+## 1. Outcome
+
+The pre-grant prototype proves one narrow user story:
+
+> A user holding testnet sBTC and zero STX signs one sBTC transfer, an OSSR
+> relay validates and sponsors it, the recipient receives the requested sats,
+> and the relay receives the quoted sats atomically while paying the network fee
+> in STX.
+
+The demonstration is complete only when that flow is reproducible from the
+documented setup, has a public explorer transaction, and exercises the primary
+failure cases before the sponsor signs.
+
+## 2. Scope freeze
+
+### Included
+
+- Stacks testnet only.
+- One independently operated relay and sponsor account.
+- One action: `sponsored-transfer` through the allowlisted sBTC adapter.
+- Signed, short-lived, single-use quotes denominated in sats.
+- Origin-signed sponsored transactions and relay-controlled broadcasting.
+- Atomic recipient transfer and sponsor reimbursement in the same transaction.
+- A minimal wallet UI and CLI workflow.
+- Local Clarinet/devnet testing and a public testnet acceptance run.
+- Basic operator health, transaction status, structured logs, and demo metrics.
+
+### Deferred to the funded v0.1 implementation
+
+- Rust relay and protocol core.
+- PostgreSQL and multi-instance coordination.
+- Production-grade nonce recovery and ambiguous-broadcast reconciliation.
+- Docker deployment and production operations.
+- Multiple relays, registry governance, randomized routing, and reputation.
+- Operator-funded protocol maintenance through a one-time listing fee verified
+  before registry activation.
+- A 100-transaction, 10-wallet public pilot.
+- Additional adapters, withdrawals, batching, mainnet, HSMs, and formal audit.
+
+The detailed funded implementation remains in [ROADMAP-v1.md](ROADMAP-v1.md).
+It is not a prerequisite for presenting the pre-grant prototype.
+
+## 3. What already works
+
+- [x] Protocol, architecture, API, adapter, reimbursement, and threat-model docs.
+- [x] Low-level origin-sign, sponsor-sign, broadcast, and confirmation PoC.
+- [x] Testnet-only operator with balance checks and in-process nonce serialization.
+- [x] Relay endpoints for metadata, quotes, sponsorship, health, and status.
+- [x] Atomic sBTC adapter that pays the recipient and actual `tx-sponsor?`.
+- [x] Keep payout settlement minimal: one sponsor reimbursement and no protocol
+      payment or protocol-payment record.
+- [x] Separate protocol funding from user transactions: any maintenance
+      incentive comes from an operator listing fee, not a per-transfer charge.
+- [x] Exact-amount client post-condition construction in the CLI and wallet UI.
+- [x] Explicit transaction states and failure classifications.
+- [x] Local operator registry, heartbeat health, and capacity-only failover seam.
+- [x] Clarinet simnet tests and a local devnet smoke path using mock sBTC.
+- [x] Next.js wallet UI for quote, origin signing, submission, and status.
+- [x] Root typecheck, contract tests, component tests, UI typecheck, and UI build.
+
+## 4. Remaining work
+
+### P0 — Safe sponsorship gate
+
+No sponsor signature may be produced until static policy checks pass. The
+signature is then held in memory for Stacks Core simulation and must never be
+broadcast or treated as a consumed nonce unless simulation succeeds.
+
+- [x] Require a relay-issued quote for `/v1/sponsorships`.
+- [x] Disable unquoted sponsorship, including the legacy route.
+- [x] Reject unknown, expired, or origin-mismatched quotes and return the stored
+      result for an exact retry of a completed quote.
+- [x] Validate the network, origin signature, adapter, function, and every argument.
+- [x] Require post-condition mode `Deny`.
+- [x] Require exactly one fungible-token post-condition for the quote origin.
+- [x] Require the configured sBTC asset and exact `amount + sponsor fee` outflow.
+- [x] Reject all additional post-conditions and asset-transfer permissions.
+- [x] Simulate the fully signed transaction in memory before broadcast; the
+      Stacks Core RPC requires complete origin and sponsor authorization.
+- [x] Reject failed, ambiguous, stale, or malformed simulation responses.
+- [x] Atomically reserve quote consumption before signing and preserve a
+      deterministic outcome for duplicate submissions.
+- [x] Persist quotes, request hashes, broadcast transaction IDs, and completed
+      sponsorship responses in a local owner-only JSON store.
+- [x] Persist sponsor nonce reservations and reconciliation state in a small
+      local durable store suitable for the single-relay demo.
+
+For the prototype, a local single-process store is acceptable. PostgreSQL and
+cross-instance locking remain funded v0.1 work.
+
+### P1 — Adversarial and integration tests
+
+- [x] Add relay/API tests for malformed transactions and origin mismatch.
+- [x] Add mutation tests for amount, recipient, sponsor fee, quote ID, and expiry.
+- [x] Add missing, excessive, wrong-asset, wrong-principal, and extra
+      post-condition rejection tests.
+- [x] Add expired, replayed, and concurrent duplicate quote tests.
+- [x] Add fee-limit, insufficient-STX, and failed-broadcast tests.
+- [x] Add a failed-simulation test and verify it neither broadcasts nor advances
+      the in-process sponsor nonce.
+- [x] Run the complete devnet workflow from a clean checkout.
+
+### P2 — Public testnet acceptance
+
+- [x] Confirm the canonical testnet sBTC and deployed adapter principals.
+      Verified September 18, 2026 against the live testnet API:
+      `SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token` and
+      `ST2SY3PZHMVQMYN1W4SBJ9MPHW4P8J01ST7TVQ68X.sbtc-sponsored-transfer-v1`.
+- [x] Record the immutable adapter deployment transaction and contract principal
+      in [the testnet deployment record](../TESTNET-DEPLOYMENT.md).
+- [ ] Fund an isolated, low-balance testnet sponsor account.
+- [ ] Start with a user that holds sufficient testnet sBTC and zero STX.
+- [ ] Complete at least 10 successful sponsored transfers.
+- [ ] Record at least one controlled rejection for each primary failure class.
+- [ ] Capture explorer links and before/after balances for user, recipient, and sponsor.
+- [ ] Prove that the sponsor paid STX and received the exact quoted sats.
+
+### P3 — Grant presentation and handoff
+
+- [ ] Expose a compact operator status view or metrics snapshot: health, STX
+      balance, requests, rejections, broadcasts, confirmations, and costs.
+- [ ] Record quote latency, submission-to-broadcast latency,
+      broadcast-to-confirmation latency, STX paid, and sats reimbursed.
+- [ ] Publish one clean setup-and-demo procedure.
+- [ ] Have a second developer run that procedure without author assistance.
+- [ ] Publish known limitations and accepted testnet-only risks.
+- [ ] Record a 3–5 minute demonstration.
+- [ ] Tag the pre-grant prototype release.
+
+## 5. Demo script
+
+1. Show that the user has testnet sBTC and zero STX.
+2. Connect the wallet and enter the recipient and amount.
+3. Request and display a signed quote, including the fee in sats.
+4. Sign the sponsor-enabled adapter transaction in the wallet.
+5. Show the relay validation and simulation result.
+6. Show the relay adding the sponsor authorization and paying the STX fee.
+7. Wait for confirmation and open the transaction in the explorer.
+8. Show the exact recipient amount and atomic sponsor reimbursement.
+9. Show one rejected mutation or replay without a sponsor signature.
+
+## 6. Acceptance evidence
+
+The prototype is grant-ready when all of the following are public:
+
+- [ ] Source and license.
+- [ ] Passing type, contract, relay, client, and adversarial test output.
+- [ ] Testnet adapter principal and deployment transaction.
+- [ ] Explorer link for the zero-STX acceptance transaction.
+- [ ] Balance evidence for the user, recipient, and sponsor.
+- [ ] Evidence that the sponsor paid the network fee in STX.
+- [ ] Evidence that the sponsor received the exact quote in sats atomically.
+- [ ] Metrics from the repeated testnet run.
+- [ ] Reproducible demo instructions, known limitations, and demonstration video.
+
+## 7. Release blockers
+
+Do not present the prototype as complete if any of these remain true:
+
+- The relay can sign an unquoted or expired transaction.
+- The transaction can permit more sBTC outflow than the displayed amount plus fee.
+- A failed simulation can reach broadcast or consume the in-process sponsor nonce.
+- One quote can produce multiple sponsor signatures.
+- Reimbursement can be redirected away from the actual transaction sponsor.
+- Mainnet or a non-allowlisted contract call can reach signing.
+- The public zero-STX flow cannot be reproduced from the documentation.
+- Secrets or private transaction material appear in logs or committed files.
+
+## 8. Immediate execution order
+
+1. Enforce quote expiry and the exact sBTC post-condition before signing.
+2. Add pre-sign simulation with fail-closed response handling.
+3. Add adversarial relay tests.
+4. Run and document the public testnet acceptance flow.
+5. Produce metrics, demo video, and the pre-grant release tag.

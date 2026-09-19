@@ -5,8 +5,8 @@ Overview
 --------
 This contract provides an atomic "process-and-reimburse" pattern: a sponsored transaction
 can call `process-and-reimburse`, which first delegates to a target contract's `execute`
-entrypoint (the original user action) and then pays out sBTC to an operator and a protocol
-principal from this contract's escrow balance.
+entrypoint (the original user action) and then pays out sBTC to the sponsoring
+operator from this contract's escrow balance. There is no protocol payment.
 
 Deployment notes
 ----------------
@@ -19,12 +19,12 @@ How it works (high level)
 1. Sponsor funds `reimbursement-wrapper` with sBTC (one-time or per-batch).
 2. User constructs a contract-call transaction calling `process-and-reimburse` with:
    - `target-contract` (principal) that exposes `execute` entrypoint
-   - `operator` and `protocol` principals
-   - `operator-amount` and `protocol-amount` in sBTC (token smallest units)
+   - `operator` principal
+   - `operator-amount` in sBTC (token smallest units)
    - `payload` forwarded to the target contract
 3. Sponsor signs as sponsor and pays STX fee. The resulting single sponsored tx runs atomically:
    - The target contract's `execute` is called
-   - On success, sBTC transfers from wrapper escrow to `operator` and `protocol` occur
+   - On success, one sBTC transfer from wrapper escrow to `operator` occurs
 
 Testing
 -------
