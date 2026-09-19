@@ -32,3 +32,44 @@ Verification links:
 This record identifies the immutable deployed artifact. Any future adapter
 revision must use a new contract name or deployer principal and receive a
 separate deployment record; this entry must not be repointed.
+
+## Acceptance sponsor account
+
+The isolated low-balance sponsor account is derived locally from the
+`OPERATOR_PRIVATE_KEY` environment variable. The private key is not recorded in
+this repository.
+
+| Field | Verified value |
+|---|---|
+| Sponsor address | `ST2QKEV89ZB3PCW1KC8206FDFJ7F6QANMR22ZG7F5` |
+| Funded balance | `2,000,000` microSTX (`2 STX`) |
+| Funding transaction | `0xfc07d2c5bfeed45d95fc3d2d8f61c21d1ac722c184216e2d694066b40158d376` |
+| Funding status | `success` |
+| Funding block height | `75672` |
+| Activity at verification | One transaction: the funding transfer |
+| Verified | September 18, 2026 |
+
+[View the funding transaction in Hiro Explorer](https://explorer.hiro.so/txid/0xfc07d2c5bfeed45d95fc3d2d8f61c21d1ac722c184216e2d694066b40158d376?chain=testnet).
+
+This account is intentionally kept separate from the adapter deployer and the
+test user. Before the acceptance relay starts, its sponsor-key configuration
+must resolve to this same address.
+
+## Zero-STX acceptance user
+
+The acceptance user is derived locally from the `QUOTE_PRIVATE_KEY` environment
+variable for this test run. The private key is not recorded in this repository.
+At relay startup, quote signing must be assigned a different environment key so
+the test user and quote signer remain separate runtime roles.
+
+| Field | Verified value |
+|---|---|
+| User address | `ST14MZ2VA0731Q6TEPK82FDQNHWKY8NPEMND33NE4` |
+| STX balance after setup | `0` microSTX |
+| sBTC setup amount | `2,000` sats |
+| sBTC funding transaction | `0x6219cf3a354993ea10f25ac821590d22c95037042a3cda6b58d6908957d6c7d4` |
+| Funding status | `success` |
+| Intended acceptance spend | `1,100` sats: ten transfers of `100` sats plus ten sponsor reimbursements of `10` sats |
+| Verified | September 18, 2026 |
+
+[View the sBTC funding transaction in Hiro Explorer](https://explorer.hiro.so/txid/0x6219cf3a354993ea10f25ac821590d22c95037042a3cda6b58d6908957d6c7d4?chain=testnet).

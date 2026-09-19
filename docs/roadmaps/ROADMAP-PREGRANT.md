@@ -116,8 +116,16 @@ cross-instance locking remain funded v0.1 work.
       `ST2SY3PZHMVQMYN1W4SBJ9MPHW4P8J01ST7TVQ68X.sbtc-sponsored-transfer-v1`.
 - [x] Record the immutable adapter deployment transaction and contract principal
       in [the testnet deployment record](../TESTNET-DEPLOYMENT.md).
-- [ ] Fund an isolated, low-balance testnet sponsor account.
-- [ ] Start with a user that holds sufficient testnet sBTC and zero STX.
+- [x] Fund an isolated, low-balance testnet sponsor account. The environment's
+      `OPERATOR_PRIVATE_KEY` resolves to
+      `ST2QKEV89ZB3PCW1KC8206FDFJ7F6QANMR22ZG7F5`; its sole transaction funded
+      it with `2 STX`. Evidence is in
+      [the testnet deployment record](../TESTNET-DEPLOYMENT.md#acceptance-sponsor-account).
+- [x] Start with a user that holds sufficient testnet sBTC and zero STX. The
+      environment-derived acceptance user
+      `ST14MZ2VA0731Q6TEPK82FDQNHWKY8NPEMND33NE4` holds `2,000` sats and
+      `0` microSTX; see
+      [the testnet deployment record](../TESTNET-DEPLOYMENT.md#zero-stx-acceptance-user).
 - [ ] Complete at least 10 successful sponsored transfers.
 - [ ] Record at least one controlled rejection for each primary failure class.
 - [ ] Capture explorer links and before/after balances for user, recipient, and sponsor.
