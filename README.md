@@ -18,6 +18,16 @@ Open Stacks Sponsor Relay turns this existing capability into shared public infr
 
 The runnable, testnet-only low-level sponsorship proof is documented in [docs/DEMO.md](docs/DEMO.md). It performs the exact origin-sign → sponsor-sign → broadcast → confirmation sequence using the current Stacks SDK. Run `npm install`, configure `.env` from `.env.example`, then use `npm run poc:broadcast` with funded testnet accounts.
 
+## Deployed testnet contracts
+
+| Contract | Contract ID | Explorer deployment |
+|---|---|---|
+| OSSR sponsored-transfer adapter v1 | `ST2SY3PZHMVQMYN1W4SBJ9MPHW4P8J01ST7TVQ68X.sbtc-sponsored-transfer-v1` | [View deployment](https://explorer.hiro.so/txid/0x255acce3ab68c06d9516ecac4a952f00cbfcc7c79a0ae6b704ea4ed4638c0ca9?chain=testnet) |
+| Canonical testnet sBTC token | `SN3VMHXEN64ZZF71JQ5VESXDWTR301XTTXGF4J8F1.sbtc-token` | [View deployment](https://explorer.hiro.so/txid/0x158530a55b6d96a611dd0389a34410986632ca698330542cbc3fe810a3c39aa0?chain=testnet) |
+
+Deployment transaction, block, and source-hash evidence is recorded in
+[docs/TESTNET-DEPLOYMENT.md](docs/TESTNET-DEPLOYMENT.md).
+
 OSSR is being developed in two deliberately separate protocol releases:
 
 * **v0.1 — single-transaction sponsorship:** prove the core flow with one user-authorized sBTC transfer per sponsored Stacks transaction. This is the current PoC and grant scope.
