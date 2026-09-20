@@ -23,6 +23,8 @@ export type RelayInfo = {
     maxNetworkFeeMicroStx: string;
     quoteLifetimeBlocks: string;
     sponsorFeeSats: string;
+    sponsorFeeBps?: string;
+    minimumSponsorFeeSats?: string;
   };
   quotesEnabled: boolean;
   sponsorshipsEnabled: boolean;

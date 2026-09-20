@@ -126,20 +126,35 @@ cross-instance locking remain funded v0.1 work.
       `ST14MZ2VA0731Q6TEPK82FDQNHWKY8NPEMND33NE4` holds `2,000` sats and
       `0` microSTX; see
       [the testnet deployment record](../TESTNET-DEPLOYMENT.md#zero-stx-acceptance-user).
-- [ ] Complete at least 10 successful sponsored transfers.
-- [ ] Record at least one controlled rejection for each primary failure class.
-- [ ] Capture explorer links and before/after balances for user, recipient, and sponsor.
-- [ ] Prove that the sponsor paid STX and received the exact quoted sats.
+- [x] Complete at least 10 successful sponsored transfers. Verified September
+      19, 2026: the deployed adapter has ten successful sponsored-transfer
+      calls, including nine consecutive zero-STX acceptance-user transfers
+      recorded in [the testnet deployment record](../TESTNET-DEPLOYMENT.md#sponsored-transfer-acceptance-run).
+- [x] Record at least one controlled rejection for each primary pre-signing
+      failure class. Verified September 19, 2026 for request decoding,
+      quote/intent binding, static transaction policy, and deterministic
+      execution simulation; evidence is in
+      [the testnet deployment record](../TESTNET-DEPLOYMENT.md#controlled-rejection-run).
+- [x] Capture explorer links and before/after balances for user, recipient, and
+      sponsor. All nine acceptance transactions remain canonical and successful;
+      the balance table and explorer links are in
+      [the testnet deployment record](../TESTNET-DEPLOYMENT.md#sponsored-transfer-acceptance-run).
+- [x] Prove that the sponsor paid STX and received the exact quoted sats. Live
+      transaction records identify the isolated account as sponsor, charge it
+      `125,664` microSTX in aggregate, and transfer exactly the quoted `10` sats
+      to it in each of nine acceptance transactions; see
+      [the testnet deployment record](../TESTNET-DEPLOYMENT.md#sponsor-payment-proof).
 
 ### P3 — Grant presentation and handoff
 
-- [ ] Expose a compact operator status view or metrics snapshot: health, STX
+- [x] Expose a compact operator status view or metrics snapshot: health, STX
       balance, requests, rejections, broadcasts, confirmations, and costs.
-- [ ] Record quote latency, submission-to-broadcast latency,
+- [x] Record quote latency, submission-to-broadcast latency,
       broadcast-to-confirmation latency, STX paid, and sats reimbursed.
-- [ ] Publish one clean setup-and-demo procedure.
+- [x] Publish one clean setup-and-demo procedure in
+      [PREGRANT-DEMO.md](../PREGRANT-DEMO.md).
 - [ ] Have a second developer run that procedure without author assistance.
-- [ ] Publish known limitations and accepted testnet-only risks.
+- [x] Publish [known limitations and accepted testnet-only risks](../PREGRANT-LIMITATIONS.md).
 - [ ] Record a 3–5 minute demonstration.
 - [ ] Tag the pre-grant prototype release.
 

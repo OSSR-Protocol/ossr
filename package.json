@@ -8,6 +8,7 @@
     "poc:broadcast": "tsx packages/stacks/scripts/sponsored-transaction-poc.ts --broadcast",
     "atomic-sbtc": "tsx packages/stacks/scripts/atomic-sbtc-transfer.ts",
     "atomic-sbtc:submit": "tsx packages/stacks/scripts/atomic-sbtc-transfer.ts --submit",
+    "testnet:controlled-rejections": "tsx packages/stacks/scripts/testnet-controlled-rejections.ts",
     "operator:health": "tsx apps/operator/src/cli.ts health",
     "operator:status": "tsx apps/operator/src/cli.ts status",
     "operator:nonce-status": "tsx apps/operator/src/cli.ts nonce-status",

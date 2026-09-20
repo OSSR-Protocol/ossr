@@ -96,7 +96,10 @@ async function main(): Promise<void> {
       sbtcContractAddress: process.env.SBTC_CONTRACT_ADDRESS?.trim(),
       sbtcContractName: process.env.SBTC_CONTRACT_NAME?.trim(),
       quoteLifetimeBlocks: BigInt(process.env.QUOTE_TTL_BLOCKS ?? '10'),
-      sponsorFeeSats: BigInt(process.env.SBTC_SPONSOR_FEE_SATS ?? process.env.REIMBURSEMENT_OPERATOR_SATS ?? '10'),
+      breakEvenFeeSats: BigInt(process.env.SBTC_BREAK_EVEN_FEE_SATS ?? '1'),
+      sponsorFeeSats: process.env.SBTC_SPONSOR_FEE_SATS
+        ? BigInt(process.env.SBTC_SPONSOR_FEE_SATS)
+        : undefined,
       corsAllowedOrigins: process.env.OSSR_CORS_ALLOWED_ORIGINS?.split(',').map(origin => origin.trim()).filter(Boolean),
       simulationApiUrl: process.env.STACKS_SIMULATION_API_URL?.trim(),
       simulationAuthToken: process.env.STACKS_SIMULATION_AUTH_TOKEN?.trim(),

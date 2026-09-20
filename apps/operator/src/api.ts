@@ -62,6 +62,8 @@ export type RelayApiConfig = {
   sbtcContractAddress?: string;
   sbtcContractName?: string;
   quoteLifetimeBlocks?: bigint;
+  /** Operator's estimated all-in cost. Quotes never charge less than this floor. */
+  breakEvenFeeSats?: bigint;
   sponsorFeeSats?: bigint;
   corsAllowedOrigins?: string[];
   /** Stacks Core RPC base URL exposing authenticated /v3 transaction simulation. */
@@ -121,6 +123,25 @@ export type QuoteIntent = {
   memo?: string;
 };
 
+export type OperatorMetricsSnapshot = {
+  generatedAt: string;
+  startedAt: string;
+  uptimeSeconds: number;
+  operator: Awaited<ReturnType<OssrOperator['health']>>;
+  requests: { total: number; info: number; metrics: number; quotes: number; sponsorships: number; status: number; other: number };
+  sponsorships: { rejections: number; broadcasts: number; confirmations: number };
+  latencyMs: {
+    quote: LatencySnapshot;
+    submissionToBroadcast: LatencySnapshot;
+    broadcastToConfirmation: LatencySnapshot;
+  };
+  costs: { stxPaidMicroStx: string; satsReimbursed: string };
+};
+
+export type LatencySnapshot = { count: number; total: number; average: number | null; last: number | null; max: number | null };
+
+type LatencyAccumulator = { count: number; total: number; last: number | null; max: number | null };
+
 /**
  * Minimal Day 4 HTTP relay. It intentionally does not expose completed
  * transaction bytes: the relay signs and broadcasts in the same request.
@@ -134,6 +155,22 @@ export class OssrRelayApi {
   private readonly simulationApiUrl: string;
   private readonly simulationTimeoutMs: number;
   private readonly quoteStore: QuoteStore;
+  private readonly startedAt = new Date();
+  private readonly counters = {
+    requests: { total: 0, info: 0, metrics: 0, quotes: 0, sponsorships: 0, status: 0, other: 0 },
+    rejections: 0,
+    broadcasts: 0,
+    confirmations: 0,
+    stxPaidMicroStx: 0n,
+    satsReimbursed: 0n,
+    latencyMs: {
+      quote: { count: 0, total: 0, last: null, max: null } as LatencyAccumulator,
+      submissionToBroadcast: { count: 0, total: 0, last: null, max: null } as LatencyAccumulator,
+      broadcastToConfirmation: { count: 0, total: 0, last: null, max: null } as LatencyAccumulator,
+    },
+  };
+  private readonly confirmedTransactions = new Set<string>();
+  private readonly broadcasts = new Map<string, { at: number; reimbursementSats: bigint }>();
 
   constructor(private readonly config: RelayApiConfig) {
     this.stacksApiUrl = (config.stacksApiUrl ?? 'https://api.testnet.hiro.so').replace(/\/$/, '');
@@ -165,6 +202,7 @@ export class OssrRelayApi {
   }
 
   async sponsor(input: unknown): Promise<SponsorResponse> {
+    const submittedAt = Date.now();
     this.log('relay.transaction_state', { status: 'REQUESTED' });
     const { transaction: encoded, user, quoteId } = parseSponsorRequest(input);
     if (!quoteId) throw new RelayError(400, 'QUOTE_REQUIRED', 'A relay-issued quoteId is required for sponsorship.');
@@ -210,6 +248,11 @@ export class OssrRelayApi {
     }
     const sponsorshipId = broadcast.txid;
     const result = { status: 'BROADCAST' as const, operator: this.config.operator.address, transaction_id: broadcast.txid, fee_microstx: feeMicroStx.toString(), sponsorship_id: this.config.reimbursementService ? sponsorshipId : undefined };
+    const broadcastAt = Date.now();
+    this.counters.broadcasts += 1;
+    this.counters.stxPaidMicroStx += feeMicroStx;
+    recordLatency(this.counters.latencyMs.submissionToBroadcast, broadcastAt - submittedAt);
+    this.broadcasts.set(broadcast.txid.toLowerCase(), { at: broadcastAt, reimbursementSats: BigInt(quote.quote.sponsorFee) });
     await this.quoteStore.complete(quoteId, requestHash, result);
     await this.recordSuccess(broadcast.txid);
     if (this.config.reimbursementService) {
@@ -233,7 +276,11 @@ export class OssrRelayApi {
       limits: {
         maxNetworkFeeMicroStx: this.maximumFeeMicroStx.toString(),
         quoteLifetimeBlocks: this.quoteLifetimeBlocks().toString(),
-        sponsorFeeSats: this.sponsorFeeSats().toString(),
+        sponsorFeeSats: this.config.sponsorFeeSats?.toString(),
+        sponsorFeeBps: this.config.sponsorFeeSats === undefined ? '100' : undefined,
+        minimumSponsorFeeSats: '1',
+        breakEvenFeeSats: this.breakEvenFeeSats().toString(),
+        pricingPolicy: 'max(percentage-or-fixed,break-even,1)',
       },
       quoteKeys: this.config.quotePrivateKey ? [{
         keyId: this.config.quoteKeyId ?? 'dev-quote-key',
@@ -245,13 +292,38 @@ export class OssrRelayApi {
     };
   }
 
+  async metricsSnapshot(): Promise<OperatorMetricsSnapshot> {
+    return {
+      generatedAt: new Date().toISOString(),
+      startedAt: this.startedAt.toISOString(),
+      uptimeSeconds: Math.max(0, Math.floor((Date.now() - this.startedAt.getTime()) / 1_000)),
+      operator: await this.config.operator.health(),
+      requests: { ...this.counters.requests },
+      sponsorships: {
+        rejections: this.counters.rejections,
+        broadcasts: this.counters.broadcasts,
+        confirmations: this.counters.confirmations,
+      },
+      latencyMs: {
+        quote: latencySnapshot(this.counters.latencyMs.quote),
+        submissionToBroadcast: latencySnapshot(this.counters.latencyMs.submissionToBroadcast),
+        broadcastToConfirmation: latencySnapshot(this.counters.latencyMs.broadcastToConfirmation),
+      },
+      costs: {
+        stxPaidMicroStx: this.counters.stxPaidMicroStx.toString(),
+        satsReimbursed: this.counters.satsReimbursed.toString(),
+      },
+    };
+  }
+
   async quote(input: unknown): Promise<QuoteResponse> {
+    const startedAt = Date.now();
     if (!this.config.quotePrivateKey) throw new RelayError(503, 'QUOTES_DISABLED', 'QUOTE_PRIVATE_KEY is not configured.');
     const intent = parseQuoteRequest(input);
     const adapterContract = this.adapterContract();
     const sbtcContract = this.sbtcContract();
     if (!adapterContract || !sbtcContract) throw new RelayError(503, 'QUOTE_POLICY_INCOMPLETE', 'Adapter and sBTC contract configuration are required.');
-    const sponsorFee = this.sponsorFeeSats();
+    const sponsorFee = this.sponsorFeeSats(intent.amountSats);
     if (sponsorFee > intent.maxSponsorFeeSats) throw new RelayError(422, 'SPONSOR_FEE_TOO_HIGH', 'Quoted sponsor fee exceeds maxSponsorFeeSats.');
     const issuedAt = await this.currentStacksHeight();
     const expiresAt = issuedAt + this.quoteLifetimeBlocks();
@@ -277,6 +349,7 @@ export class OssrRelayApi {
     };
     const quote = { ...unsigned, signature: signStructuredData({ message: quoteMessageCV(unsigned), domain: quoteDomainCV(), privateKey: this.config.quotePrivateKey }) };
     await this.quoteStore.putIssued({ quote, intent });
+    recordLatency(this.counters.latencyMs.quote, Date.now() - startedAt);
     return { quote, quotePublicKey: this.quotePublicKey() };
   }
 
@@ -322,8 +395,13 @@ export class OssrRelayApi {
       respondOptions(request, response, this.corsAllowedOrigins);
       return;
     }
+    this.recordRequest(request);
     if (request.method === 'GET' && request.url === '/v1/info') {
       respond(request, response, 200, await this.info(), this.corsAllowedOrigins);
+      return;
+    }
+    if (request.method === 'GET' && request.url === '/v1/metrics') {
+      respond(request, response, 200, await this.metricsSnapshot(), this.corsAllowedOrigins);
       return;
     }
     if (request.method === 'GET' && request.url === '/health/live') {
@@ -367,6 +445,16 @@ export class OssrRelayApi {
     if (request.method === 'GET' && sponsorshipMatch) {
       try {
         const status = await this.config.operator.transactionStatus(sponsorshipMatch[1]);
+        const transactionId = sponsorshipMatch[1].toLowerCase();
+        if (status.status === 'success' && !this.confirmedTransactions.has(transactionId)) {
+          this.confirmedTransactions.add(transactionId);
+          this.counters.confirmations += 1;
+          const lifecycle = this.broadcasts.get(transactionId);
+          if (lifecycle) {
+            recordLatency(this.counters.latencyMs.broadcastToConfirmation, Date.now() - lifecycle.at);
+            this.counters.satsReimbursed += lifecycle.reimbursementSats;
+          }
+        }
         const stored = await this.quoteStore.findByTransactionId(sponsorshipMatch[1]);
         respond(request, response, 200, { transactionId: `0x${sponsorshipMatch[1]}`, quoteId: stored?.quote.quoteId, status: status.status, blockHeight: status.blockHeight, raw: status.raw }, this.corsAllowedOrigins);
       } catch (error) {
@@ -407,10 +495,22 @@ export class OssrRelayApi {
         }, this.corsAllowedOrigins);
       }
     } catch (error) {
+      this.counters.rejections += 1;
       const relayError = toRelayError(error);
       this.log('relay.sponsor.rejected', { code: relayError.code, message: relayError.message });
       respond(request, response, relayError.status, { error: relayError.code, message: relayError.message }, this.corsAllowedOrigins);
     }
+  }
+
+  private recordRequest(request: IncomingMessage): void {
+    let kind: keyof Omit<typeof this.counters.requests, 'total'> = 'other';
+    if (request.method === 'GET' && request.url === '/v1/info') kind = 'info';
+    else if (request.method === 'GET' && request.url === '/v1/metrics') kind = 'metrics';
+    else if (request.method === 'POST' && request.url === '/v1/quotes') kind = 'quotes';
+    else if (request.method === 'POST' && (request.url === '/v1/sponsor' || request.url === '/v1/sponsorships')) kind = 'sponsorships';
+    else if (request.method === 'GET' && /^\/v1\/sponsorships\/0x[0-9a-f]{64}$/i.test(request.url ?? '')) kind = 'status';
+    this.counters.requests.total += 1;
+    this.counters.requests[kind] += 1;
   }
 
   private async reconcileReimbursements(): Promise<void> {
@@ -442,8 +542,18 @@ export class OssrRelayApi {
     return this.config.quoteLifetimeBlocks ?? BigInt(process.env.QUOTE_TTL_BLOCKS ?? '10');
   }
 
-  private sponsorFeeSats(): bigint {
-    return this.config.sponsorFeeSats ?? BigInt(process.env.SBTC_SPONSOR_FEE_SATS ?? process.env.REIMBURSEMENT_OPERATOR_SATS ?? '10');
+  private sponsorFeeSats(amountSats: bigint): bigint {
+    const configured = this.config.sponsorFeeSats;
+    const requestedFee = configured ?? (amountSats + 99n) / 100n;
+    // A quote cannot underpay the operator: the signed fee covers at least the
+    // configured all-in cost, even for transfers smaller than that cost.
+    return maxBigInt(1n, requestedFee, this.breakEvenFeeSats());
+  }
+
+  private breakEvenFeeSats(): bigint {
+    const fee = this.config.breakEvenFeeSats ?? 1n;
+    if (fee < 0n) throw new Error('breakEvenFeeSats must not be negative.');
+    return fee;
   }
 
   private quotePublicKey(): string {
@@ -472,6 +582,10 @@ export class OssrRelayApi {
 
 function transactionHash(encoded: string): string {
   return createHash('sha256').update(Buffer.from(encoded.slice(2), 'hex')).digest('hex');
+}
+
+function maxBigInt(...values: bigint[]): bigint {
+  return values.reduce((maximum, value) => value > maximum ? value : maximum);
 }
 
 export function validateSimulationResponse(body: unknown, expectedTxid: string, minimumBlockHeight: number): void {
@@ -721,6 +835,24 @@ function parseCorsOrigins(value: string | undefined): string[] {
     .split(',')
     .map(origin => origin.trim().replace(/\/$/, ''))
     .filter(Boolean);
+}
+
+function recordLatency(accumulator: LatencyAccumulator, milliseconds: number): void {
+  const duration = Math.max(0, Math.round(milliseconds));
+  accumulator.count += 1;
+  accumulator.total += duration;
+  accumulator.last = duration;
+  accumulator.max = accumulator.max === null ? duration : Math.max(accumulator.max, duration);
+}
+
+function latencySnapshot(accumulator: LatencyAccumulator): LatencySnapshot {
+  return {
+    count: accumulator.count,
+    total: accumulator.total,
+    average: accumulator.count === 0 ? null : accumulator.total / accumulator.count,
+    last: accumulator.last,
+    max: accumulator.max,
+  };
 }
 
 class RelayError extends Error {

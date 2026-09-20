@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { request, type Server } from 'node:http';
 import {
   Pc,
   PostConditionMode,
@@ -14,6 +15,30 @@ import {
 import { OssrRelayApi } from './api.js';
 import { OssrOperator } from './operator.js';
 import { MemoryQuoteStore } from './quote-store.js';
+
+async function listen(server: Server): Promise<number> {
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Test server did not bind to a TCP port.');
+  return address.port;
+}
+
+async function httpJson(port: number, path: string, method = 'GET', body?: unknown): Promise<{ status: number; body: any }> {
+  const payload = body === undefined ? undefined : JSON.stringify(body);
+  return new Promise((resolve, reject) => {
+    const outgoing = request({ host: '127.0.0.1', port, path, method, headers: payload === undefined ? undefined : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } }, response => {
+      const chunks: Buffer[] = [];
+      response.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      response.on('end', () => resolve({ status: response.statusCode ?? 0, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }));
+    });
+    outgoing.once('error', reject);
+    if (payload !== undefined) outgoing.write(payload);
+    outgoing.end();
+  });
+}
 
 async function assertRelayRejection(promise: Promise<unknown>, status: number, code: string, message: RegExp): Promise<void> {
   try {
@@ -75,6 +100,41 @@ try {
     maxSponsorFeeSats: '20',
   });
   const quote = quoteResponse.quote;
+
+  const percentageRelay = new OssrRelayApi({
+    operator,
+    quotePrivateKey: randomPrivateKey(),
+    adapterContractAddress: adapterAddress,
+    adapterContractName: 'sbtc-sponsored-transfer-v1',
+    sbtcContractAddress: sbtcAddress,
+    sbtcContractName: 'sbtc-token',
+  });
+  const oneSatQuote = await percentageRelay.quote({ origin, recipient, amountSats: '1', maxSponsorFeeSats: '1' });
+  const exactPercentQuote = await percentageRelay.quote({ origin, recipient, amountSats: '100', maxSponsorFeeSats: '1' });
+  const roundedPercentQuote = await percentageRelay.quote({ origin, recipient, amountSats: '101', maxSponsorFeeSats: '2' });
+  assert.equal(oneSatQuote.quote.sponsorFee, '1', 'the percentage fee must never be zero');
+  assert.equal(exactPercentQuote.quote.sponsorFee, '1', '100 sats should quote a 1 sat fee');
+  assert.equal(roundedPercentQuote.quote.sponsorFee, '2', 'fractional sats should round up');
+
+  const breakEvenRelay = new OssrRelayApi({
+    operator,
+    quotePrivateKey: randomPrivateKey(),
+    adapterContractAddress: adapterAddress,
+    adapterContractName: 'sbtc-sponsored-transfer-v1',
+    sbtcContractAddress: sbtcAddress,
+    sbtcContractName: 'sbtc-token',
+    breakEvenFeeSats: 7n,
+  });
+  const tinyBreakEvenQuote = await breakEvenRelay.quote({ origin, recipient, amountSats: '1', maxSponsorFeeSats: '7' });
+  const largeBreakEvenQuote = await breakEvenRelay.quote({ origin, recipient, amountSats: '1000', maxSponsorFeeSats: '10' });
+  assert.equal(tinyBreakEvenQuote.quote.sponsorFee, '7', 'small transfers must cover the operator cost floor');
+  assert.equal(largeBreakEvenQuote.quote.sponsorFee, '10', 'the percentage fee applies above the cost floor');
+  await assertRelayRejection(
+    breakEvenRelay.quote({ origin, recipient, amountSats: '1', maxSponsorFeeSats: '6' }),
+    422,
+    'SPONSOR_FEE_TOO_HIGH',
+    /exceeds maxSponsorFeeSats/,
+  );
 
   await assertRelayRejection(
     relay.sponsor({ quoteId: quote.quoteId, transaction: '0x00', user: origin }),
@@ -319,6 +379,26 @@ try {
   assert.deepEqual(replayed, completed);
   assert.equal(lifecycleBroadcasts, 1, 'concurrent duplicate and replay must not create another broadcast');
 
+  Object.assign(lifecycleOperator, {
+    transactionStatus: async () => ({ status: 'success', blockHeight: 101, raw: { tx_status: 'success' } }),
+  });
+  const lifecycleServer = lifecycleRelay.createServer();
+  const lifecyclePort = await listen(lifecycleServer);
+  try {
+    const confirmed = await httpJson(lifecyclePort, `/v1/sponsorships/0x${completed.transaction_id}`);
+    assert.equal(confirmed.status, 200);
+    const lifecycleMetrics = await httpJson(lifecyclePort, '/v1/metrics');
+    assert.equal(lifecycleMetrics.body.latencyMs.quote.count, 1);
+    assert.equal(lifecycleMetrics.body.latencyMs.submissionToBroadcast.count, 1);
+    assert.equal(lifecycleMetrics.body.latencyMs.broadcastToConfirmation.count, 1);
+    assert.equal(lifecycleMetrics.body.sponsorships.broadcasts, 1, 'replay must not inflate broadcast metrics');
+    assert.equal(lifecycleMetrics.body.sponsorships.confirmations, 1);
+    assert.match(lifecycleMetrics.body.costs.stxPaidMicroStx, /^[1-9]\d*$/);
+    assert.equal(lifecycleMetrics.body.costs.satsReimbursed, '10');
+  } finally {
+    await new Promise<void>((resolve, reject) => lifecycleServer.close(error => error ? reject(error) : resolve()));
+  }
+
   const failedBroadcastOperator = new OssrOperator({ network: 'testnet', sponsorPrivateKey: randomPrivateKey(), logger: () => undefined });
   let failedBroadcastAttempts = 0;
   Object.assign(failedBroadcastOperator, {
@@ -369,6 +449,33 @@ try {
     /already being processed/,
   );
   assert.equal(failedBroadcastAttempts, 1, 'ambiguous broadcast must not be retried automatically');
+
+  const metricsServer = relay.createServer();
+  const metricsPort = await listen(metricsServer);
+  try {
+    const firstSnapshot = await httpJson(metricsPort, '/v1/metrics');
+    assert.equal(firstSnapshot.status, 200);
+    assert.equal(firstSnapshot.body.operator.healthy, true);
+    assert.equal(firstSnapshot.body.operator.balanceMicroStx, '1000000');
+    assert.deepEqual(firstSnapshot.body.requests, { total: 1, info: 0, metrics: 1, quotes: 0, sponsorships: 0, status: 0, other: 0 });
+    assert.deepEqual(firstSnapshot.body.sponsorships, { rejections: 0, broadcasts: 0, confirmations: 0 });
+    assert.deepEqual(firstSnapshot.body.costs, { stxPaidMicroStx: '0', satsReimbursed: '0' });
+    assert.ok(firstSnapshot.body.latencyMs.quote.count >= 1);
+    assert.deepEqual(firstSnapshot.body.latencyMs.submissionToBroadcast, { count: 0, total: 0, average: null, last: null, max: null });
+    assert.deepEqual(firstSnapshot.body.latencyMs.broadcastToConfirmation, { count: 0, total: 0, average: null, last: null, max: null });
+
+    const rejected = await httpJson(metricsPort, '/v1/sponsorships', 'POST', { transaction: 'not-hex', user: origin });
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.body.error, 'INVALID_TRANSACTION');
+
+    const secondSnapshot = await httpJson(metricsPort, '/v1/metrics');
+    assert.equal(secondSnapshot.body.requests.total, 3);
+    assert.equal(secondSnapshot.body.requests.metrics, 2);
+    assert.equal(secondSnapshot.body.requests.sponsorships, 1);
+    assert.equal(secondSnapshot.body.sponsorships.rejections, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) => metricsServer.close(error => error ? reject(error) : resolve()));
+  }
 } finally {
   globalThis.fetch = originalFetch;
 }

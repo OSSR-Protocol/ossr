@@ -2,6 +2,9 @@
 
 Next.js testnet interface for the origin side of OSSR v0.1.
 
+The prioritized work required for a grant-reviewable interface is tracked in
+[GRANT-READINESS.md](GRANT-READINESS.md).
+
 ## Wallet model
 
 The MVP should use an existing browser wallet through Stacks Connect. The UI

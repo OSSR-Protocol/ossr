@@ -54,10 +54,21 @@ The interface-facing v1 endpoints are:
 
 ```text
 GET /v1/info
+GET /v1/metrics
 POST /v1/quotes
 POST /v1/sponsorships
 GET /v1/sponsorships/0x<txid>
 ```
+
+`GET /v1/metrics` returns a compact, process-lifetime snapshot containing
+operator readiness and STX balance, request counts, rejected sponsorships,
+successful broadcasts, observed confirmations, cumulative STX network fees,
+and confirmed sBTC reimbursements. It also reports count, total, average, last,
+and maximum milliseconds for quote generation, submission-to-broadcast, and
+broadcast-to-confirmation latency. Confirmations and the quote's sponsor fee are
+counted once when the status endpoint observes `success`; replays do not inflate
+broadcast totals.
+Counters reset when the relay process restarts and contain no wallet secrets.
 
 `POST /v1/sponsor` remains only as a compatibility alias and, like
 `POST /v1/sponsorships`, requires a relay-issued `quoteId`. Unquoted

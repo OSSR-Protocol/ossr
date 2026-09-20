@@ -4,7 +4,7 @@
 
 ### One-line proposal
 
-Open Stacks Sponsor Relay is an open-source, multi-operator network that lets users execute Stacks transactions without holding STX. Independent relayers pay the network fee in STX and receive reimbursement in a supported token. The first PoC uses sBTC; future adapters could support another assets.
+Open Stacks Sponsor Relay is an open-source, multi-operator network that lets users execute Stacks transactions without holding STX. Independent relayers pay the network fee in STX and receive reimbursement in a supported token. The first PoC uses sBTC; future adapters could support other assets.
 
 ---
 
@@ -14,7 +14,32 @@ Stacks supports sponsored transactions in which the transaction originator autho
 
 Open Stacks Sponsor Relay turns this existing capability into shared public infrastructure.
 
-## Day 2 transaction PoC
+## Current prototype status
+
+**Status as of September 19, 2026:** the single-relay, testnet-only pre-grant
+prototype has completed its public sponsored-transfer acceptance run. It is a
+working proof of concept, not a production or mainnet release.
+
+| Capability | Current evidence |
+|---|---|
+| Zero-STX user flow | A user holding testnet sBTC and `0` microSTX completed nine consecutive acceptance transfers. |
+| Public transactions | The deployed adapter now has ten canonical successful `sponsored-transfer` calls. |
+| Atomic settlement | Each acceptance transaction sent `100` sats to the recipient and exactly `10` sats to the sponsor. |
+| Sponsor payment | The acceptance sponsor paid `125,664` microSTX in aggregate and received exactly `90` sats. |
+| Safety gate | Controlled request-decoding, quote-mismatch, post-condition, and failed-simulation cases were rejected before broadcast. |
+| Rejection accounting | The controlled run recorded four rejections, zero broadcasts, zero confirmations, and zero fee or token movement. |
+| Local simulation | A snapshot-bootstrapped Stacks Core testnet follower provides authenticated, fail-closed transaction simulation and runs under Docker restart supervision. |
+| Operator observability | Health, request, rejection, broadcast, confirmation, latency, STX-cost, and sats-reimbursement metrics are exposed. |
+
+The acceptance balances, per-transaction fees, exact reimbursement events,
+and explorer links are recorded in
+[docs/TESTNET-DEPLOYMENT.md](docs/TESTNET-DEPLOYMENT.md). The remaining
+pre-grant work is presentation and handoff: an independent second-developer
+run, a short recorded demonstration, and a tagged prototype release. Track the
+live checklist in
+[docs/roadmaps/ROADMAP-PREGRANT.md](docs/roadmaps/ROADMAP-PREGRANT.md).
+
+### Low-level transaction PoC
 
 The runnable, testnet-only low-level sponsorship proof is documented in [docs/DEMO.md](docs/DEMO.md). It performs the exact origin-sign → sponsor-sign → broadcast → confirmation sequence using the current Stacks SDK. Run `npm install`, configure `.env` from `.env.example`, then use `npm run poc:broadcast` with funded testnet accounts.
 
@@ -27,6 +52,16 @@ The runnable, testnet-only low-level sponsorship proof is documented in [docs/DE
 
 Deployment transaction, block, and source-hash evidence is recorded in
 [docs/TESTNET-DEPLOYMENT.md](docs/TESTNET-DEPLOYMENT.md).
+
+The canonical setup and repeatable end-to-end acceptance procedure is documented in
+[docs/PREGRANT-DEMO.md](docs/PREGRANT-DEMO.md). It covers local Stacks Core
+simulation, relay startup, the atomic zero-STX user transfer, balance evidence,
+metrics, and a controlled rejection.
+
+The prototype's implementation gaps and narrowly accepted testnet-only risks
+are published in
+[docs/PREGRANT-LIMITATIONS.md](docs/PREGRANT-LIMITATIONS.md). They are not a
+claim of production or mainnet readiness.
 
 OSSR is being developed in two deliberately separate protocol releases:
 
