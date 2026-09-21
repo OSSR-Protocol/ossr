@@ -104,4 +104,18 @@ body {
   html {
     @apply font-sans;
   }
+
+  input[data-slot="input"]:autofill,
+  input[data-slot="input"]:-webkit-autofill,
+  input[data-slot="input"]:-webkit-autofill:hover,
+  input[data-slot="input"]:-webkit-autofill:focus {
+    background-color: transparent !important;
+    background-image: none !important;
+    background-clip: text !important;
+    -webkit-background-clip: text !important;
+    -webkit-text-fill-color: var(--foreground) !important;
+    caret-color: var(--foreground);
+    color-scheme: dark;
+    transition: background-color 9999s ease-out 0s;
+  }
 }

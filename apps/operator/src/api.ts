@@ -64,6 +64,14 @@ export type RelayApiConfig = {
   quoteLifetimeBlocks?: bigint;
   /** Operator's estimated all-in cost. Quotes never charge less than this floor. */
   breakEvenFeeSats?: bigint;
+  /** Enables a quote-time floor derived from live network fees and STX/BTC prices. */
+  dynamicPricing?: boolean;
+  estimatedTransactionBytes?: bigint;
+  infrastructureCostSats?: bigint;
+  riskReserveSats?: bigint;
+  minimumProfitSats?: bigint;
+  pricingApiUrl?: string;
+  pricingCacheMs?: number;
   sponsorFeeSats?: bigint;
   corsAllowedOrigins?: string[];
   /** Stacks Core RPC base URL exposing authenticated /v3 transaction simulation. */
@@ -171,6 +179,7 @@ export class OssrRelayApi {
   };
   private readonly confirmedTransactions = new Set<string>();
   private readonly broadcasts = new Map<string, { at: number; reimbursementSats: bigint }>();
+  private pricingCache?: { expiresAt: number; floorSats: bigint; networkFeeMicroStx: bigint; networkCostSats: bigint };
 
   constructor(private readonly config: RelayApiConfig) {
     this.stacksApiUrl = (config.stacksApiUrl ?? 'https://api.testnet.hiro.so').replace(/\/$/, '');
@@ -265,6 +274,7 @@ export class OssrRelayApi {
   async info(): Promise<object> {
     const adapterContract = this.adapterContract();
     const sbtcContract = this.sbtcContract();
+    const dynamicPricing = this.config.dynamicPricing ? await this.dynamicCostFloor() : undefined;
     return {
       apiVersion: '1',
       relayId: this.config.relayId ?? this.config.operatorId ?? this.config.operator.address,
@@ -279,8 +289,16 @@ export class OssrRelayApi {
         sponsorFeeSats: this.config.sponsorFeeSats?.toString(),
         sponsorFeeBps: this.config.sponsorFeeSats === undefined ? '100' : undefined,
         minimumSponsorFeeSats: '1',
-        breakEvenFeeSats: this.breakEvenFeeSats().toString(),
-        pricingPolicy: 'max(percentage-or-fixed,break-even,1)',
+        breakEvenFeeSats: (dynamicPricing?.floorSats ?? this.breakEvenFeeSats()).toString(),
+        pricingPolicy: this.config.dynamicPricing
+          ? 'max(percentage-or-fixed,network-cost+infrastructure+risk+minimum-profit,1)'
+          : 'max(percentage-or-fixed,break-even,1)',
+        dynamicPricing: this.config.dynamicPricing ?? false,
+        estimatedNetworkFeeMicroStx: dynamicPricing?.networkFeeMicroStx.toString(),
+        estimatedNetworkCostSats: dynamicPricing?.networkCostSats.toString(),
+        infrastructureCostSats: (this.config.infrastructureCostSats ?? 0n).toString(),
+        riskReserveSats: (this.config.riskReserveSats ?? 0n).toString(),
+        minimumProfitSats: (this.config.minimumProfitSats ?? 1n).toString(),
       },
       quoteKeys: this.config.quotePrivateKey ? [{
         keyId: this.config.quoteKeyId ?? 'dev-quote-key',
@@ -323,7 +341,7 @@ export class OssrRelayApi {
     const adapterContract = this.adapterContract();
     const sbtcContract = this.sbtcContract();
     if (!adapterContract || !sbtcContract) throw new RelayError(503, 'QUOTE_POLICY_INCOMPLETE', 'Adapter and sBTC contract configuration are required.');
-    const sponsorFee = this.sponsorFeeSats(intent.amountSats);
+    const sponsorFee = await this.sponsorFeeSats(intent.amountSats);
     if (sponsorFee > intent.maxSponsorFeeSats) throw new RelayError(422, 'SPONSOR_FEE_TOO_HIGH', 'Quoted sponsor fee exceeds maxSponsorFeeSats.');
     const issuedAt = await this.currentStacksHeight();
     const expiresAt = issuedAt + this.quoteLifetimeBlocks();
@@ -542,12 +560,46 @@ export class OssrRelayApi {
     return this.config.quoteLifetimeBlocks ?? BigInt(process.env.QUOTE_TTL_BLOCKS ?? '10');
   }
 
-  private sponsorFeeSats(amountSats: bigint): bigint {
+  private async sponsorFeeSats(amountSats: bigint): Promise<bigint> {
     const configured = this.config.sponsorFeeSats;
     const requestedFee = configured ?? (amountSats + 99n) / 100n;
+    const costFloor = this.config.dynamicPricing
+      ? (await this.dynamicCostFloor()).floorSats
+      : this.breakEvenFeeSats();
     // A quote cannot underpay the operator: the signed fee covers at least the
     // configured all-in cost, even for transfers smaller than that cost.
-    return maxBigInt(1n, requestedFee, this.breakEvenFeeSats());
+    return maxBigInt(1n, requestedFee, costFloor);
+  }
+
+  private async dynamicCostFloor(): Promise<{ floorSats: bigint; networkFeeMicroStx: bigint; networkCostSats: bigint }> {
+    if (this.pricingCache && this.pricingCache.expiresAt > Date.now()) return this.pricingCache;
+    const estimatedBytes = this.config.estimatedTransactionBytes ?? 600n;
+    const infrastructure = this.config.infrastructureCostSats ?? 0n;
+    const riskReserve = this.config.riskReserveSats ?? 0n;
+    const minimumProfit = this.config.minimumProfitSats ?? 1n;
+    if (estimatedBytes <= 0n || infrastructure < 0n || riskReserve < 0n || minimumProfit < 1n) {
+      throw new RelayError(503, 'PRICING_POLICY_INVALID', 'Dynamic pricing inputs are invalid.');
+    }
+    try {
+      const [feeResponse, priceResponse] = await Promise.all([
+        fetch(`${this.stacksApiUrl}/v2/fees/transfer`, { headers: { Accept: 'text/plain' } }),
+        fetch(this.config.pricingApiUrl ?? 'https://api.coingecko.com/api/v3/simple/price?ids=blockstack,bitcoin&vs_currencies=usd', { headers: { Accept: 'application/json' } }),
+      ]);
+      if (!feeResponse.ok || !priceResponse.ok) throw new Error(`pricing dependency returned HTTP ${!feeResponse.ok ? feeResponse.status : priceResponse.status}`);
+      const feeRateText = (await feeResponse.text()).trim();
+      if (!/^[0-9]+$/.test(feeRateText) || BigInt(feeRateText) < 1n) throw new Error('invalid network fee rate');
+      const prices = await priceResponse.json() as { blockstack?: { usd?: unknown }; bitcoin?: { usd?: unknown } };
+      const stxUsd = positivePriceScale(prices.blockstack?.usd, 'STX');
+      const btcUsd = positivePriceScale(prices.bitcoin?.usd, 'BTC');
+      const networkFeeMicroStx = BigInt(feeRateText) * estimatedBytes;
+      const networkCostSats = ceilDiv(networkFeeMicroStx * stxUsd * 100_000_000n, 1_000_000n * btcUsd);
+      const floorSats = networkCostSats + infrastructure + riskReserve + minimumProfit;
+      const result = { floorSats, networkFeeMicroStx, networkCostSats, expiresAt: Date.now() + (this.config.pricingCacheMs ?? 60_000) };
+      this.pricingCache = result;
+      return result;
+    } catch (error) {
+      throw new RelayError(503, 'PRICING_UNAVAILABLE', `Cannot calculate a safe sponsor fee: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private breakEvenFeeSats(): bigint {
@@ -586,6 +638,17 @@ function transactionHash(encoded: string): string {
 
 function maxBigInt(...values: bigint[]): bigint {
   return values.reduce((maximum, value) => value > maximum ? value : maximum);
+}
+
+function ceilDiv(numerator: bigint, denominator: bigint): bigint {
+  return (numerator + denominator - 1n) / denominator;
+}
+
+function positivePriceScale(value: unknown, symbol: string): bigint {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) throw new Error(`invalid ${symbol}/USD price`);
+  // Eight decimal places are enough for quote pricing. STX rounds upward and
+  // BTC rounding error is negligible at this scale; the final division rounds up.
+  return BigInt(Math.max(1, Math.round(value * 100_000_000)));
 }
 
 export function validateSimulationResponse(body: unknown, expectedTxid: string, minimumBlockHeight: number): void {

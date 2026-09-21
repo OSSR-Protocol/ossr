@@ -8,6 +8,7 @@ const geistMono = Geist_Mono({ subsets: ['latin'], variable: '--font-geist-mono'
 export const metadata: Metadata = {
   title: 'OSSR — Open Stacks Sponsor Relay',
   description: 'The open protocol for sponsored Stacks transactions. Move sBTC without holding STX.',
+  icons: { icon: '/ossr.svg' },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

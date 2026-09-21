@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 292 292" role="img" aria-label="OSSR">
+  <mask id="ossr-cutout">
+    <rect width="292" height="292" fill="white" rx="79" />
+    <circle cx="146" cy="146" r="51" fill="black" />
+  </mask>
+  <rect width="292" height="292" fill="white" rx="79" mask="url(#ossr-cutout)" />
+</svg>

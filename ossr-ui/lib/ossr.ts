@@ -22,9 +22,11 @@ export type RelayInfo = {
   limits: {
     maxNetworkFeeMicroStx: string;
     quoteLifetimeBlocks: string;
-    sponsorFeeSats: string;
+    sponsorFeeSats?: string;
     sponsorFeeBps?: string;
     minimumSponsorFeeSats?: string;
+    breakEvenFeeSats?: string;
+    pricingPolicy?: string;
   };
   quotesEnabled: boolean;
   sponsorshipsEnabled: boolean;
@@ -78,6 +80,17 @@ export type SbtcBalance = {
   balanceSats: string;
   token: string;
 };
+
+export class RelayRequestError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string | undefined,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'RelayRequestError';
+  }
+}
 
 export type PreparedWalletCall = {
   contract: ContractIdString;
@@ -148,6 +161,15 @@ export async function fetchSbtcBalance(address: string, sbtcContract = 'SN3VMHXE
     token,
     balanceSats: response.fungible_tokens?.[token]?.balance ?? '0',
   };
+}
+
+export async function fetchStacksTipHeight(): Promise<number> {
+  const apiUrl = process.env.NEXT_PUBLIC_STACKS_API_URL ?? 'https://api.testnet.hiro.so';
+  const info = await fetchJson<{ stacks_tip_height?: number }>(`${apiUrl.replace(/\/$/, '')}/v2/info`);
+  if (!Number.isSafeInteger(info.stacks_tip_height) || (info.stacks_tip_height ?? -1) < 0) {
+    throw new Error('Stacks API did not return a valid tip height.');
+  }
+  return info.stacks_tip_height as number;
 }
 
 export function prepareWalletContractCall(input: {
@@ -271,7 +293,20 @@ const ADAPTER_ERRORS: Record<number, string> = {
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   const body = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${JSON.stringify(body)}`);
+  if (!response.ok) {
+    const envelope = isRecord(body) && isRecord(body.error) ? body.error : body;
+    const code = isRecord(envelope) && typeof envelope.code === 'string'
+      ? envelope.code
+      : isRecord(body) && typeof body.error === 'string'
+        ? body.error
+        : undefined;
+    const message = isRecord(envelope) && typeof envelope.message === 'string'
+      ? envelope.message
+      : isRecord(body) && typeof body.message === 'string'
+        ? body.message
+        : response.statusText || 'The relay rejected the request.';
+    throw new RelayRequestError(response.status, code, message);
+  }
   return body as T;
 }
 

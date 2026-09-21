@@ -97,6 +97,13 @@ async function main(): Promise<void> {
       sbtcContractName: process.env.SBTC_CONTRACT_NAME?.trim(),
       quoteLifetimeBlocks: BigInt(process.env.QUOTE_TTL_BLOCKS ?? '10'),
       breakEvenFeeSats: BigInt(process.env.SBTC_BREAK_EVEN_FEE_SATS ?? '1'),
+      dynamicPricing: process.env.SBTC_DYNAMIC_PRICING !== 'false',
+      estimatedTransactionBytes: BigInt(process.env.SBTC_ESTIMATED_TRANSACTION_BYTES ?? '600'),
+      infrastructureCostSats: BigInt(process.env.SBTC_INFRASTRUCTURE_COST_SATS ?? '0'),
+      riskReserveSats: BigInt(process.env.SBTC_RISK_RESERVE_SATS ?? '0'),
+      minimumProfitSats: BigInt(process.env.SBTC_MINIMUM_PROFIT_SATS ?? '1'),
+      pricingApiUrl: process.env.SBTC_PRICING_API_URL?.trim(),
+      pricingCacheMs: Number(process.env.SBTC_PRICING_CACHE_SECONDS ?? '60') * 1_000,
       sponsorFeeSats: process.env.SBTC_SPONSOR_FEE_SATS
         ? BigInt(process.env.SBTC_SPONSOR_FEE_SATS)
         : undefined,

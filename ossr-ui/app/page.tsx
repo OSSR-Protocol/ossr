@@ -1,7 +1,12 @@
+'use client';
+
 import Image from 'next/image';
 import Link from 'next/link';
-import { ArrowRight, Blocks, Braces, Check, ChevronRight, CircleDot, Code2, Coins, Github, LockKeyhole, Network, RadioTower, ShieldCheck, Sparkles, TerminalSquare, Users, WalletCards, Zap } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { ArrowRight, Blocks, Check, ChevronRight, CircleDot, Code2, Github, ShieldCheck, Sparkles, TerminalSquare, Users, WalletCards } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import Dashboard from './dashboard/page';
 import styles from './page.module.css';
 
 const steps = [
@@ -11,18 +16,31 @@ const steps = [
 ];
 
 const principles = [
-  { icon: LockKeyhole, title: 'Non-custodial', copy: 'Users sign their own intent. Operators sponsor execution, but never control user funds.' },
-  { icon: Network, title: 'Open operator network', copy: 'A permissionless relay layer designed for resilient routing and transparent competition.' },
-  { icon: Zap, title: 'One seamless action', copy: 'Fees are handled behind the scenes, making Stacks applications feel fast and familiar.' },
+  { icon: '/lock.svg', title: 'Non-custodial', copy: 'Users sign their own intent. Operators sponsor execution, but never control user funds.' },
+  { icon: '/network.svg', title: 'Open operator network', copy: 'A permissionless relay layer designed for resilient routing and transparent competition.' },
+  { icon: '/flash.svg', title: 'One seamless action', copy: 'Fees are handled behind the scenes, making Stacks applications feel fast and familiar.' },
 ];
 
+const connectedAddressKey = 'ossr-ui:connected-stx-address';
+
+function compactAddress(address: string): string {
+  return address.length > 12 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
+}
+
 export default function Home() {
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [connectedAddress, setConnectedAddress] = useState('');
+
+  useEffect(() => {
+    setConnectedAddress(window.localStorage.getItem(connectedAddressKey) ?? '');
+  }, []);
+
   return <main className={styles.page}>
     <div className={styles.ambient} aria-hidden="true" />
     <header className={styles.header}>
       <Link href="/" className={styles.brand} aria-label="OSSR home"><span>OSSR</span></Link>
       <nav className={styles.nav} aria-label="Primary navigation"><a href="#documentation">Documentation</a><a href="#operators">Operators</a><a href="#developers">Developers</a></nav>
-      <Button asChild className={styles.connect}><Link href="/dashboard">Connect <ArrowRight /></Link></Button>
+      <Button className={styles.connect} onClick={() => setTransferOpen(true)}>{connectedAddress ? compactAddress(connectedAddress) : 'Connect'} <ArrowRight /></Button>
     </header>
 
     <section className={styles.hero}>
@@ -53,12 +71,12 @@ export default function Home() {
 
     <section id="documentation" className={styles.section}>
       <div className={styles.intro}><span className={styles.kicker}>THE PROTOCOL</span><h2>A better transaction primitive.</h2><p>OSSR separates user intent from fee payment, letting applications deliver gasless experiences without compromising ownership.</p></div>
-      <div className={styles.principles}>{principles.map(({icon: Icon,title,copy}) => <article key={title} className={styles.principle}><div className={styles.cardIcon}><Icon /></div><h3>{title}</h3><p>{copy}</p></article>)}</div>
+      <div className={styles.principles}>{principles.map(({icon,title,copy}) => <article key={title} className={styles.principle}><div className={styles.cardIcon}><Image src={icon} alt="" width={30} height={30} /></div><h3>{title}</h3><p>{copy}</p></article>)}</div>
     </section>
 
     <section className={styles.how}>
       <div className={styles.howHeader}><div><span className={styles.kicker}>HOW IT WORKS</span><h2>Simple for users.<br />Powerful underneath.</h2></div><p>A compact, verifiable flow connects wallets, relay operators, and the Stacks network.</p></div>
-      <div className={styles.steps}>{steps.map(([number,title,copy], index) => <article key={number} className={styles.step}><span>{number}</span><div>{index===0?<RadioTower />:index===1?<Braces />:<Coins />}</div><h3>{title}</h3><p>{copy}</p></article>)}</div>
+      <div className={styles.steps}>{steps.map(([number,title,copy], index) => <article key={number} className={styles.step}><span>{number}</span><div><Image src={index === 0 ? '/quote.svg' : index === 1 ? '/sign.svg' : '/send-bitcoin.svg'} alt="" width={28} height={28} /></div><h3>{title}</h3><p>{copy}</p></article>)}</div>
     </section>
 
     <section className={styles.paths}>
@@ -66,8 +84,18 @@ export default function Home() {
       <article id="developers" className={styles.path}><div className={styles.cardIcon}><Code2 /></div><span className={styles.kicker}>FOR DEVELOPERS</span><h2>Make gasless feel native.</h2><p>Integrate sponsored sBTC transfers with a small, predictable API designed for modern applications.</p><a href="#documentation">Read the docs <ArrowRight /></a><div className={styles.code}><div><TerminalSquare /><span>request.ts</span></div><pre><span>const</span> quote = <span>await</span> ossr.quote({'{'}{`\n  amount: 1000,\n  token: 'sBTC'\n`}{'}'});</pre></div></article>
     </section>
 
-    <section className={styles.final}><div className={styles.orb}><Image src="/ossr-logo.png" alt="" width={72} height={72} /></div><span className={styles.kicker}>READY TO GET STARTED?</span><h2>The open relay layer for Stacks.</h2><p>Connect your wallet and experience sponsored transactions on testnet.</p><Button asChild size="lg" className={styles.primary}><Link href="/dashboard">Connect to OSSR <ArrowRight /></Link></Button></section>
-    <footer className={styles.footer}><div className={styles.brand}><Image src="/ossr-logo.png" alt="" width={30} height={30}/><span>OSSR</span></div><p>Open Stacks Sponsor Relay. Built in the open.</p><div><a href="#documentation">Protocol</a><a href="#operators">Operators</a><a href="#developers">Developers</a><a href="https://github.com" aria-label="GitHub"><Github /></a></div></footer>
+    <section className={styles.final}><span className={styles.kicker}>READY TO GET STARTED?</span><h2>The open relay layer for Stacks.</h2><p>Connect your wallet and experience sponsored transactions on testnet.</p><Button size="lg" className={styles.primary} onClick={() => setTransferOpen(true)}>Connect to OSSR <ArrowRight /></Button></section>
+    <footer className={styles.footer}><div className={styles.brand}><span>OSSR</span></div><p>Open Stacks Sponsor Relay. Built in the open.</p><div><a href="#documentation">Protocol</a><a href="#operators">Operators</a><a href="#developers">Developers</a><a href="https://github.com" aria-label="GitHub"><Github /></a></div></footer>
+
+    <Dialog open={transferOpen} onOpenChange={setTransferOpen}>
+      <DialogContent className="w-[min(26.5rem,calc(100vw-1rem))] max-h-[calc(100vh-2rem)] max-w-none overflow-y-auto border-white/15 bg-background/65 p-0 shadow-2xl backdrop-blur-2xl sm:max-w-none">
+        <DialogHeader className="sr-only">
+          <DialogTitle>Sponsored sBTC transfer</DialogTitle>
+          <DialogDescription>Connect a wallet, request a quote, and approve the sponsored transaction.</DialogDescription>
+        </DialogHeader>
+        <Dashboard embedded onWalletChange={setConnectedAddress} />
+      </DialogContent>
+    </Dialog>
   </main>;
 }
 

@@ -66,6 +66,7 @@ globalThis.fetch = async input => {
   if (url.endsWith('/v2/info')) return new Response(JSON.stringify({ stacks_tip_height: stacksHeight }), { status: 200 });
   if (url.includes('/extended/v1/address/') && url.endsWith('/stx')) return new Response(JSON.stringify({ balance: '1000000', locked: '0' }), { status: 200 });
   if (url.endsWith('/v2/fees/transfer')) return new Response('1', { status: 200 });
+  if (url.includes('api.coingecko.com/api/v3/simple/price')) return new Response(JSON.stringify({ blockstack: { usd: 0.4 }, bitcoin: { usd: 80_000 } }), { status: 200 });
   throw new Error(`Unexpected fetch in relay policy test: ${url}`);
 };
 
@@ -135,6 +136,26 @@ try {
     'SPONSOR_FEE_TOO_HIGH',
     /exceeds maxSponsorFeeSats/,
   );
+
+  const dynamicRelay = new OssrRelayApi({
+    operator,
+    quotePrivateKey: randomPrivateKey(),
+    adapterContractAddress: adapterAddress,
+    adapterContractName: 'sbtc-sponsored-transfer-v1',
+    sbtcContractAddress: sbtcAddress,
+    sbtcContractName: 'sbtc-token',
+    dynamicPricing: true,
+    estimatedTransactionBytes: 476n,
+    infrastructureCostSats: 2n,
+    riskReserveSats: 1n,
+    minimumProfitSats: 1n,
+  });
+  const dynamicQuote = await dynamicRelay.quote({ origin, recipient, amountSats: '100', maxSponsorFeeSats: '5' });
+  assert.equal(dynamicQuote.quote.sponsorFee, '5', 'dynamic fee must cover network cost, infrastructure, risk, and one sat profit');
+  const dynamicInfo = await dynamicRelay.info() as { limits: Record<string, string | boolean> };
+  assert.equal(dynamicInfo.limits.estimatedNetworkFeeMicroStx, '476');
+  assert.equal(dynamicInfo.limits.estimatedNetworkCostSats, '1');
+  assert.equal(dynamicInfo.limits.breakEvenFeeSats, '5');
 
   await assertRelayRejection(
     relay.sponsor({ quoteId: quote.quoteId, transaction: '0x00', user: origin }),

@@ -18,12 +18,14 @@ import {
   extractRawTransaction,
   fetchRelayInfo,
   fetchSbtcBalance,
+  fetchStacksTipHeight,
   fetchSponsorshipStatus,
   isFailedChainStatus,
   isTerminalChainStatus,
   likelyFailureCause,
   prepareWalletContractCall,
   requestQuote,
+  RelayRequestError,
   submitSponsorship,
   type QuoteResponse,
   type RelayInfo,
@@ -51,12 +53,48 @@ function savedConnectedAddress(): string {
   return window.localStorage.getItem(connectedAddressKey) ?? '';
 }
 
-export default function Home() {
+type DisplayError = { title: string; message: string; action?: string; code?: string };
+
+const errorGuidance: Record<string, Pick<DisplayError, 'title' | 'action'>> = {
+  QUOTE_EXPIRED: { title: 'This quote has expired', action: 'Go back and request a fresh quote, then approve it promptly.' },
+  QUOTE_ALREADY_USED: { title: 'This quote was already used', action: 'Go back and request a new quote.' },
+  QUOTE_ORIGIN_MISMATCH: { title: 'The connected wallet changed', action: 'Reconnect the wallet that requested this quote, or request a new quote.' },
+  ORIGIN_MISMATCH: { title: 'The signing wallet does not match', action: 'Reconnect the wallet shown in the transfer details and try again.' },
+  INVALID_ORIGIN_SIGNATURE: { title: 'The wallet signature could not be verified', action: 'Reject any pending wallet request, then approve the transaction again.' },
+  SPONSOR_FEE_TOO_HIGH: { title: 'The sponsor fee is above your limit', action: 'Go back, request a new quote, and review the updated fee.' },
+  SIMULATION_FAILED: { title: 'The transaction would fail on-chain', action: 'Check that your wallet has enough testnet sBTC for the amount and sponsor fee, then request a new quote.' },
+  INVALID_POST_CONDITIONS: { title: 'The wallet changed the transfer safeguards', action: 'Try again with a wallet that supports the exact post-conditions shown in this review.' },
+  QUOTE_TRANSACTION_MISMATCH: { title: 'The signed transaction does not match this quote', action: 'Go back and request a new quote before signing again.' },
+  WRONG_NETWORK: { title: 'Your wallet is on the wrong network', action: 'Switch the wallet to Stacks testnet and try again.' },
+  UNSUPPORTED_AUTH: { title: 'The wallet did not create a sponsored transaction', action: 'Use a wallet that supports sponsored Stacks contract calls.' },
+  FEE_OUT_OF_POLICY: { title: 'The network fee is outside relay limits', action: 'Request a new quote later, when testnet fees have changed.' },
+};
+
+function displayError(error: unknown): DisplayError {
+  if (error instanceof RelayRequestError) {
+    const guidance = error.code ? errorGuidance[error.code] : undefined;
+    return {
+      title: guidance?.title ?? (error.status === 422 ? 'The relay could not approve this transaction' : 'The relay rejected the request'),
+      message: error.message,
+      action: guidance?.action,
+      code: [error.code, `HTTP ${error.status}`].filter(Boolean).join(' · '),
+    };
+  }
+  if (error instanceof TypeError && /fetch|network|failed/i.test(error.message)) {
+    return { title: 'The relay could not be reached', message: 'The relay may be offline or blocked by your network.', action: 'Check the relay endpoint and your connection, then try again.' };
+  }
+  return {
+    title: 'We couldn\'t complete that request',
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+export default function Home({ embedded = false, onWalletChange }: { embedded?: boolean; onWalletChange?: (address: string) => void }) {
   const [relayUrl, setRelayUrl] = useState(defaultRelayUrl);
   const [relayInfo, setRelayInfo] = useState<RelayInfo>();
   const [origin, setOrigin] = useState(savedConnectedAddress);
   const [recipient, setRecipient] = useState('');
-  const [amountSats, setAmountSats] = useState('100');
+  const [amountSats, setAmountSats] = useState('');
   const [maxSponsorFeeSats, setMaxSponsorFeeSats] = useState('1');
   const [memo, setMemo] = useState('');
   const [quoteResponse, setQuoteResponse] = useState<QuoteResponse>();
@@ -64,11 +102,13 @@ export default function Home() {
   const [status, setStatus] = useState<SponsorshipStatus>();
   const [sbtcBalance, setSbtcBalance] = useState<SbtcBalance>();
   const [busy, setBusy] = useState<string>();
-  const [error, setError] = useState<string>();
+  const [error, setError] = useState<DisplayError>();
   const [autoRelayChecked, setAutoRelayChecked] = useState(false);
   const [transactionModalOpen, setTransactionModalOpen] = useState(false);
+  const [quoteRenewing, setQuoteRenewing] = useState(false);
   const [statusObservationCount, setStatusObservationCount] = useState(0);
   const statusObservation = useRef({ value: '', count: 0 });
+  const quoteRefreshInFlight = useRef(false);
 
   const totalSats = useMemo(() => {
     if (!quoteResponse?.quote.sponsorFee || !/^\d+$/.test(amountSats)) return undefined;
@@ -76,13 +116,16 @@ export default function Home() {
   }, [amountSats, quoteResponse]);
 
   const defaultSponsorFeeSats = useMemo(() => {
-    if (!/^[1-9]\d*$/.test(amountSats)) return '1';
-    if (!relayInfo?.limits.sponsorFeeBps) return relayInfo?.limits.sponsorFeeSats ?? '1';
-    const amount = BigInt(amountSats);
-    const basisPoints = BigInt(relayInfo.limits.sponsorFeeBps);
-    const calculated = (amount * basisPoints + 9_999n) / 10_000n;
-    const minimum = BigInt(relayInfo.limits.minimumSponsorFeeSats ?? '1');
-    return (calculated < minimum ? minimum : calculated).toString();
+    const amount = /^[1-9]\d*$/.test(amountSats) ? BigInt(amountSats) : 0n;
+    const limits = relayInfo?.limits;
+    const percentageOrFixed = limits?.sponsorFeeBps && /^\d+$/.test(limits.sponsorFeeBps)
+      ? (amount * BigInt(limits.sponsorFeeBps) + 9_999n) / 10_000n
+      : BigInt(limits?.sponsorFeeSats && /^\d+$/.test(limits.sponsorFeeSats) ? limits.sponsorFeeSats : '1');
+    const minimum = BigInt(limits?.minimumSponsorFeeSats && /^\d+$/.test(limits.minimumSponsorFeeSats) ? limits.minimumSponsorFeeSats : '1');
+    const breakEven = BigInt(limits?.breakEvenFeeSats && /^\d+$/.test(limits.breakEvenFeeSats) ? limits.breakEvenFeeSats : '1');
+    return [percentageOrFixed, minimum, breakEven]
+      .reduce((maximum, fee) => fee > maximum ? fee : maximum, 1n)
+      .toString();
   }, [amountSats, relayInfo]);
 
   const memoByteLength = useMemo(() => new TextEncoder().encode(memo).length, [memo]);
@@ -156,6 +199,45 @@ export default function Home() {
   }, [defaultSponsorFeeSats]);
 
   useEffect(() => {
+    if (!transactionModalOpen || sponsorship || !quoteResponse || busy === 'submit') return;
+    let cancelled = false;
+
+    const renewIfNeeded = async () => {
+      if (quoteRefreshInFlight.current) return;
+      quoteRefreshInFlight.current = true;
+      try {
+        const tipHeight = await fetchStacksTipHeight();
+        if (cancelled || BigInt(tipHeight + 1) < BigInt(quoteResponse.quote.expiresAtBlock)) return;
+        setQuoteRenewing(true);
+        const freshQuote = await requestQuote({
+          relayUrl,
+          origin,
+          recipient,
+          amountSats,
+          maxSponsorFeeSats,
+          ...(memo.trim() ? { memo: normalizeMemo(memo) } : {}),
+        });
+        if (!cancelled) {
+          setQuoteResponse(freshQuote);
+          setError(undefined);
+        }
+      } catch {
+        // The existing quote remains visible; submission will retry renewal if it is obsolete.
+      } finally {
+        quoteRefreshInFlight.current = false;
+        setQuoteRenewing(false);
+      }
+    };
+
+    void renewIfNeeded();
+    const interval = window.setInterval(renewIfNeeded, 1_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [amountSats, busy, maxSponsorFeeSats, memo, origin, quoteResponse, recipient, relayUrl, sponsorship, transactionModalOpen]);
+
+  useEffect(() => {
     if (!origin) {
       setSbtcBalance(undefined);
       return;
@@ -215,7 +297,7 @@ export default function Home() {
     try {
       return await operation();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      setError(displayError(caught));
       return undefined;
     } finally {
       setBusy(undefined);
@@ -229,6 +311,7 @@ export default function Home() {
     setQuoteResponse(undefined);
     setSponsorship(undefined);
     setStatus(undefined);
+    onWalletChange?.('');
   }
 
   async function connectWallet({ replaceCurrent = false }: { replaceCurrent?: boolean } = {}) {
@@ -244,6 +327,7 @@ export default function Home() {
       if (!stx?.address) throw new Error('Wallet did not return a Stacks address.');
       setOrigin(stx.address);
       window.localStorage.setItem(connectedAddressKey, stx.address);
+      onWalletChange?.(stx.address);
     });
   }
 
@@ -271,6 +355,19 @@ export default function Home() {
       return quote;
     });
     if (quote) setTransactionModalOpen(true);
+  }
+
+  async function replaceObsoleteQuote(): Promise<QuoteResponse> {
+    const freshQuote = await requestQuote({
+      relayUrl,
+      origin,
+      recipient,
+      amountSats,
+      maxSponsorFeeSats,
+      ...(memo.trim() ? { memo: normalizeMemo(memo) } : {}),
+    });
+    setQuoteResponse(freshQuote);
+    return freshQuote;
   }
 
   function resetForNewQuote() {
@@ -312,12 +409,27 @@ export default function Home() {
       });
       const transaction = extractRawTransaction(walletResult);
       if (!transaction) throw new Error('Wallet did not return raw signed transaction bytes. This wallet may only support sign-and-broadcast contract calls.');
-      const response = await submitSponsorship({
-        relayUrl,
-        quoteId: quoteResponse.quote.quoteId,
-        transaction,
-        user: origin,
-      });
+      let response: SponsorshipResponse;
+      try {
+        response = await submitSponsorship({
+          relayUrl,
+          quoteId: quoteResponse.quote.quoteId,
+          transaction,
+          user: origin,
+        });
+      } catch (caught) {
+        const obsoleteQuote = caught instanceof RelayRequestError
+          && ['QUOTE_EXPIRED', 'QUOTE_NOT_FOUND', 'QUOTE_ALREADY_USED'].includes(caught.code ?? '');
+        if (!obsoleteQuote) throw caught;
+        const freshQuote = await replaceObsoleteQuote();
+        setError({
+          title: 'Your quote was refreshed',
+          message: 'The previous quote became obsolete before it could be submitted.',
+          action: `Review the updated ${freshQuote.quote.sponsorFee} sat sponsor fee, then approve again in your wallet.`,
+          code: caught.code,
+        });
+        return;
+      }
       statusObservation.current = { value: '', count: 0 };
       setStatusObservationCount(0);
       setSponsorship(response);
@@ -325,14 +437,13 @@ export default function Home() {
   }
 
   const canQuote = Boolean(origin && recipient && amountSats && maxSponsorFeeSats && memoByteLength <= 34 && !insufficientBalance);
-  const canSubmit = Boolean(quoteResponse && !sponsorship && !failed);
+  const canSubmit = Boolean(quoteResponse && !sponsorship && !failed && !quoteRenewing);
 
   return (
-    <main className="min-h-screen bg-background text-foreground">
-      <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 pt-5 pb-72 sm:px-6 sm:pb-44 lg:px-8 lg:pt-8 lg:pb-32">
-        <header className="mb-8 flex flex-col gap-5 border-b border-border pb-6 md:flex-row md:items-center md:justify-between">
+    <main className={embedded ? 'bg-background text-foreground' : 'min-h-screen bg-background text-foreground'}>
+      <div className={embedded ? 'mx-auto flex w-full flex-col' : 'mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 pt-5 pb-72 sm:px-6 sm:pb-44 lg:px-8 lg:pt-8 lg:pb-32'}>
+        {!embedded ? <header className="mb-8 flex flex-col gap-5 border-b border-border pb-6 md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-4">
-            <div className="grid size-11 place-items-center rounded-xl bg-primary text-lg font-bold text-primary-foreground shadow-sm">O</div>
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-xl font-semibold tracking-tight">Open Stacks Sponsor Relay</h1>
@@ -364,15 +475,15 @@ export default function Home() {
               </Button>
             )}
           </div>
-        </header>
+        </header> : null}
 
-        <Alert className="mb-6 border-primary/20 bg-primary/5">
+        {!embedded ? <Alert className="mb-6 border-primary/20 bg-primary/5">
           <ShieldCheck />
           <AlertTitle>Prototype transaction on Stacks testnet</AlertTitle>
           <AlertDescription>The wallet authorizes an exact sBTC outflow. The sponsor pays STX and receives the quoted fee atomically.</AlertDescription>
-        </Alert>
+        </Alert> : null}
 
-        <section className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 px-4 py-3 shadow-[0_-12px_40px_rgba(0,0,0,0.24)] backdrop-blur sm:px-6 lg:px-8" aria-label="Transfer status">
+        {!embedded ? <section className="fixed inset-x-0 bottom-0 z-40 border-t bg-background/95 px-4 py-3 shadow-[0_-12px_40px_rgba(0,0,0,0.24)] backdrop-blur sm:px-6 lg:px-8" aria-label="Transfer status">
           <div className="mx-auto grid w-full max-w-7xl gap-3 sm:grid-cols-2 lg:grid-cols-5">
             <StatusRow icon={<Radio />} label="Relay" value={relayInfo?.relayId ?? 'Not loaded'} ok={Boolean(relayInfo)} />
             <StatusRow icon={<Wallet />} label="Wallet" value={origin ? compact(origin) : 'Not connected'} ok={Boolean(origin)} />
@@ -380,37 +491,54 @@ export default function Home() {
             <StatusRow icon={<CheckCircle2 />} label="Quote" value={quoteResponse ? `${quoteResponse.quote.sponsorFee} sats` : 'Not requested'} ok={Boolean(quoteResponse)} />
             <StatusRow icon={<Send />} label="Transaction" value={provisionalStatus ? 'Rechecking status' : status?.status ?? sponsorship?.status ?? 'Not submitted'} ok={Boolean(sponsorship) && !failed} />
           </div>
-        </section>
+        </section> : null}
 
-        <div className="mx-auto flex w-full max-w-lg">
-          <Card size="sm" className="w-full">
+        <div className={embedded ? 'flex w-full' : 'mx-auto flex w-full max-w-lg'}>
+          <Card size="sm" className={embedded ? 'w-full border-white/10 bg-card/45 shadow-none backdrop-blur-xl' : 'w-full'}>
             <CardContent>
-              <form className="grid gap-4" onSubmit={event => { event.preventDefault(); void createQuote(); }}>
-                <Tabs defaultValue="transfer" className="gap-4">
-                  <TabsList className="grid w-full grid-cols-2">
+              <form className={embedded ? 'grid gap-3' : 'grid gap-4'} onSubmit={event => { event.preventDefault(); void createQuote(); }}>
+                <Tabs defaultValue="transfer" className={embedded ? 'gap-3' : 'gap-4'}>
+                  {embedded ? (
+                    <div className="relative flex items-center">
+                      <h2 className="text-lg font-semibold tracking-tight">Transfer</h2>
+                      <Badge variant="secondary" className="absolute left-1/2 -translate-x-1/2">Testnet</Badge>
+                    </div>
+                  ) : <TabsList className="grid w-full grid-cols-2">
                     <TabsTrigger value="transfer" className="cursor-pointer">Transfer</TabsTrigger>
                     <TabsTrigger value="advanced" className="cursor-pointer">Advanced</TabsTrigger>
-                  </TabsList>
+                  </TabsList>}
 
-                  <TabsContent value="transfer" className="grid gap-4">
+                  <TabsContent value="transfer" className={embedded ? 'grid gap-3' : 'grid gap-4'}>
                     <div className="grid gap-3 sm:grid-cols-2">
                       <div className="grid gap-2 sm:col-span-2">
-                        <Label htmlFor="recipient">Recipient</Label>
-                        <Input id="recipient" value={recipient} onChange={event => setRecipient(event.target.value)} placeholder="ST…" className="h-16 font-mono text-3xl md:text-3xl" />
-                      </div>
-                      <div className="grid gap-2">
                         <Label htmlFor="amount">Amount</Label>
                         <div className="relative">
-                          <Input id="amount" value={amountSats} onChange={event => setAmountSats(event.target.value)} inputMode="numeric" className="h-16 pr-14 text-3xl md:text-3xl" />
+                          <Input id="amount" value={amountSats} onChange={event => setAmountSats(event.target.value)} inputMode="numeric" autoComplete="off" placeholder="0" className="h-16 bg-transparent pr-14 text-3xl dark:bg-transparent md:text-3xl" />
                           <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">sats</span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4 px-1 text-sm">
+                          <div className="flex items-center justify-between">
+                            <span className="text-muted-foreground">Fee</span>
+                            <span className="font-medium">{defaultSponsorFeeSats} sats</span>
+                          </div>
+                          <div className="flex items-center justify-between border-l border-border pl-4">
+                            <span className="text-muted-foreground">Balance</span>
+                            <span className="font-medium">{sbtcBalance ? `${sbtcBalance.balanceSats} sats` : origin ? 'Loading' : '—'}</span>
+                          </div>
                         </div>
                       </div>
-                      <div className="grid gap-2">
-                        <Label htmlFor="max-fee">Maximum sponsor fee</Label>
-                        <div className="relative">
-                          <Input id="max-fee" value={maxSponsorFeeSats} onChange={event => setMaxSponsorFeeSats(event.target.value)} inputMode="numeric" className="h-16 pr-14 text-3xl md:text-3xl" />
-                          <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">sats</span>
-                        </div>
+                      <div className="grid gap-2 sm:col-span-2 [container-type:inline-size]">
+                        <Label htmlFor="recipient">To</Label>
+                        <Input
+                          id="recipient"
+                          value={recipient}
+                          onChange={event => setRecipient(event.target.value.trim())}
+                          placeholder="ST…"
+                          spellCheck={false}
+                          autoCapitalize="characters"
+                          autoComplete="off"
+                          className="h-16 bg-transparent font-mono !text-[clamp(0.6875rem,3.7cqw,1rem)] tracking-[-0.02em] dark:bg-transparent"
+                        />
                       </div>
                       <Accordion type="single" collapsible className="sm:col-span-2">
                         <AccordionItem value="memo" className="rounded-lg border px-3">
@@ -418,7 +546,7 @@ export default function Home() {
                           <AccordionContent className="pb-3">
                             <div className="grid gap-2">
                               <Label htmlFor="memo">Memo text <span className="font-normal text-muted-foreground">(optional)</span></Label>
-                              <Input id="memo" value={memo} onChange={event => setMemo(event.target.value)} placeholder="Add a short message…" />
+                              <Input id="memo" value={memo} onChange={event => setMemo(event.target.value)} placeholder="Add a short message…" autoComplete="off" className="bg-transparent dark:bg-transparent" />
                               <p className={memoByteLength > 34 ? 'text-xs text-destructive' : 'text-xs text-muted-foreground'}>{memoByteLength}/34 bytes · converted to hex automatically</p>
                             </div>
                           </AccordionContent>
@@ -431,7 +559,7 @@ export default function Home() {
                     ) : null}
                   </TabsContent>
 
-                  <TabsContent value="advanced">
+                  {!embedded ? <TabsContent value="advanced">
                     <div className="grid gap-2 rounded-lg border p-4">
                       <Label htmlFor="relay-url">Relay endpoint</Label>
                       <div className="flex gap-2">
@@ -442,13 +570,20 @@ export default function Home() {
                       </div>
                       <p className="text-xs text-muted-foreground">Change this only when connecting to a custom OSSR operator.</p>
                     </div>
-                  </TabsContent>
+                  </TabsContent> : null}
                 </Tabs>
 
-                <Button size="lg" type="submit" disabled={!canQuote || Boolean(busy)} className="h-18 w-full text-lg">
-                  {busy === 'quote' ? <Loader2 className="animate-spin" /> : <ArrowRight />}
-                  Request quote
-                </Button>
+                {embedded && !origin ? (
+                  <Button size="lg" type="button" onClick={() => void connectWallet()} disabled={Boolean(busy)} className="h-18 w-full text-lg">
+                    {busy === 'wallet' ? <Loader2 className="animate-spin" /> : <Wallet />}
+                    {busy === 'wallet' ? 'Connecting wallet…' : 'Connect wallet'}
+                  </Button>
+                ) : (
+                  <Button size="lg" type="submit" disabled={!canQuote || Boolean(busy)} className="h-18 w-full text-lg">
+                    {busy === 'quote' ? <Loader2 className="animate-spin" /> : <ArrowRight />}
+                    Request quote
+                  </Button>
+                )}
               </form>
             </CardContent>
           </Card>
@@ -457,16 +592,18 @@ export default function Home() {
 
         <Dialog open={transactionModalOpen} onOpenChange={setTransactionModalOpen}>
           <DialogContent className="max-h-[90vh] overflow-y-auto p-0 sm:max-w-xl" aria-describedby="transaction-modal-description">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="absolute top-2 left-2 z-10"
-              onClick={resetForNewQuote}
-              disabled={Boolean(busy)}
-              aria-label="Back to transfer details"
-            >
-              <ArrowLeft />
-            </Button>
+            {!sponsorship ? (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="absolute top-2 left-2 z-10"
+                onClick={resetForNewQuote}
+                disabled={Boolean(busy)}
+                aria-label="Back to transfer details"
+              >
+                <ArrowLeft />
+              </Button>
+            ) : null}
 
             {status?.status === 'success' ? (
               <div className="grid place-items-center gap-5 px-6 pt-16 pb-8 text-center">
@@ -478,12 +615,12 @@ export default function Home() {
                   <DialogDescription id="transaction-modal-description">Your sponsored sBTC transfer has confirmed on Stacks testnet.</DialogDescription>
                 </DialogHeader>
                 <dl className="w-full rounded-lg border bg-muted/30 p-4 text-sm">
-                  <ReviewRow label="Recipient received" value={`${amountSats} sats`} emphasized />
-                  <ReviewRow label="Sponsor fee" value={`${quoteResponse?.quote.sponsorFee ?? '—'} sats`} />
+                  <ReviewRow label="Amount" value={`${amountSats} sats`} emphasized />
+                  <ReviewRow label="Fee" value={`${quoteResponse?.quote.sponsorFee ?? '—'} sats`} />
                   <ReviewRow label="Transaction" valueNode={<TransactionId txid={txid} successful />} />
                   <ReviewRow label="Block height" value={status.blockHeight?.toString() ?? '—'} mono />
                 </dl>
-                <Button size="lg" className="w-full" onClick={resetForNewQuote}><CheckCircle2 /> Done</Button>
+                <Button size="lg" className="h-10 w-full" onClick={resetForNewQuote}><CheckCircle2 /> Done</Button>
               </div>
             ) : (
               <>
@@ -496,15 +633,15 @@ export default function Home() {
 
                 <div className="grid gap-5 px-5 py-2 sm:px-6">
                   <div className="flex items-center justify-between rounded-lg border bg-primary/5 px-4 py-3">
-                    <div><p className="text-xs text-muted-foreground">Recipient receives</p><p className="mt-1 font-mono text-xl font-semibold">{amountSats} sats</p></div>
-                    <Badge variant={sponsorship ? 'default' : 'secondary'}>{sponsorship ? provisionalStatus ? 'Rechecking status' : status?.status ?? 'Broadcast' : 'Quote ready'}</Badge>
+                    <div><p className="text-xs text-muted-foreground">Amount</p><p className="mt-1 font-mono text-xl font-semibold">{amountSats} sats</p></div>
+                    <Badge variant={sponsorship ? 'default' : 'secondary'}>{sponsorship ? provisionalStatus ? 'Rechecking status' : status?.status ?? 'Broadcast' : quoteRenewing ? 'Renewing quote' : 'Quote ready'}</Badge>
                   </div>
 
                   <dl className="grid gap-2 rounded-lg border bg-muted/30 p-4 text-sm">
                     <ReviewRow label="Sponsor fee" value={quoteResponse ? `${quoteResponse.quote.sponsorFee} sats` : '—'} />
                     <ReviewRow label="Maximum outflow" value={totalSats ? `${totalSats} sats` : '—'} emphasized />
                     <Separator className="my-1" />
-                    <ReviewRow label="Recipient" value={compact(recipient, 10)} mono />
+                    <ReviewRow label="To" value={compact(recipient, 10)} mono />
                     <ReviewRow label="Sponsor" value={quoteResponse ? compact(quoteResponse.quote.sponsorPrincipal, 10) : '—'} mono />
                     <ReviewRow label="Expires at block" value={quoteResponse?.quote.expiresAtBlock ?? '—'} mono />
                     <ReviewRow label="Transaction" valueNode={<TransactionId txid={txid} successful={false} />} />
@@ -515,12 +652,12 @@ export default function Home() {
                       {failed ? <CircleAlert className="size-10 text-destructive" /> : <Loader2 className="size-10 animate-spin text-primary" />}
                       <div>
                         <p className="font-medium">{failed ? 'Transaction failed' : provisionalStatus ? 'Rechecking chain status' : 'Waiting for confirmation'}</p>
-                        <p className="mt-1 text-xs text-muted-foreground">{provisionalStatus ? `The indexer returned ${status?.status}. OSSR will verify it again before treating it as final (${statusObservationCount}/3).` : describeChainStatus(status)}</p>
+                        {!provisionalStatus ? <p className="mt-1 text-xs text-muted-foreground">{describeChainStatus(status)}</p> : null}
                       </div>
                     </div>
                   ) : null}
 
-                  {error ? <Alert variant="destructive"><CircleAlert /><AlertTitle>Request failed</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
+                  {error ? <ErrorAlert error={error} /> : null}
                   {sponsorship && failed ? <TransactionOutcome status={status} txid={txid} failed amountSats={amountSats} sponsorFeeSats={quoteResponse?.quote.sponsorFee} origin={origin} /> : null}
                 </div>
 
@@ -540,19 +677,31 @@ export default function Home() {
         </Dialog>
 
         {error ? (
-          <Alert variant="destructive" className="mt-6" aria-live="polite">
-            <CircleAlert />
-            <AlertTitle>Request failed</AlertTitle>
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
+          <ErrorAlert error={error} className="mt-6" />
         ) : null}
 
-        <footer className="mt-8 flex flex-col gap-2 border-t border-border pt-5 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+        {!embedded ? <footer className="mt-8 flex flex-col gap-2 border-t border-border pt-5 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
           <span>OSSR v0.1 prototype · Testnet only · Do not use mainnet funds</span>
           <span>The relay pays STX. You authorize only the reviewed sBTC outflow.</span>
-        </footer>
+        </footer> : null}
       </div>
     </main>
+  );
+}
+
+function ErrorAlert({ error, className }: { error: DisplayError; className?: string }) {
+  const normalize = (value: string) => value.toLowerCase().replace(/^(this|the)\s+/, '').replace(/[^a-z0-9]+/g, ' ').trim();
+  const showMessage = normalize(error.message) !== normalize(error.title);
+  return (
+    <Alert variant="destructive" className={className} aria-live="polite">
+      <CircleAlert />
+      <AlertTitle>{error.title}</AlertTitle>
+      <AlertDescription className="grid gap-1.5">
+        {showMessage ? <span>{error.message}</span> : null}
+        {error.action ? <span className="font-medium">What to do: {error.action}</span> : null}
+        {error.code ? <span className="font-mono text-[11px] opacity-75">{error.code}</span> : null}
+      </AlertDescription>
+    </Alert>
   );
 }
 
@@ -632,8 +781,8 @@ function ReviewRow({ label, value, valueNode, mono = false, emphasized = false }
 }) {
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.35fr)] items-start gap-4 py-1">
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className={`${mono ? 'font-mono text-xs' : ''} ${emphasized ? 'font-semibold text-foreground' : ''} min-w-0 [overflow-wrap:anywhere] text-right`}>
+      <dt className="text-right text-muted-foreground">{label}</dt>
+      <dd className={`${mono ? 'font-mono text-xs' : ''} ${emphasized ? 'font-semibold text-foreground' : ''} min-w-0 [overflow-wrap:anywhere] text-left`}>
         {valueNode ?? value ?? '—'}
       </dd>
     </div>
